@@ -5,12 +5,12 @@ import { createMainWatchdogReview } from "./review.ts";
 import { DEFAULT_WATCHDOG_CONFIG } from "./settings.ts";
 import { createWatchdogWarningMessage } from "./warning-format.ts";
 import {
-	CHILD_WATCHDOG_CONFIG_ENV,
 	CHILD_WATCHDOG_STATUS_EVENT,
 	decodeChildWatchdogConfig,
 	type ChildWatchdogConfig,
 	type ChildWatchdogPhase,
 } from "./child-status.ts";
+import { readChildRuntimeConfigFromEnv } from "../runs/shared/child-runtime-config.ts";
 import type { ResolvedWatchdogConfig, WatchdogWarningDetails } from "./types.ts";
 
 export function childResolvedConfig(config: ChildWatchdogConfig): ResolvedWatchdogConfig {
@@ -51,8 +51,8 @@ function writeStatus(event: unknown): void {
 	}
 }
 
-export function registerChildWatchdog(pi: ExtensionAPI, rawConfig = process.env[CHILD_WATCHDOG_CONFIG_ENV]): MainWatchdogRuntime | undefined {
-	const childConfig = decodeChildWatchdogConfig(rawConfig);
+export function registerChildWatchdog(pi: ExtensionAPI, configOrRaw: ChildWatchdogConfig | string | undefined = readChildRuntimeConfigFromEnv(process.env).childWatchdog): MainWatchdogRuntime | undefined {
+	const childConfig = typeof configOrRaw === "string" ? decodeChildWatchdogConfig(configOrRaw) : configOrRaw;
 	if (!childConfig) return undefined;
 	let currentContext: ExtensionContext | undefined;
 	let diffBaseline: WatchdogDiffBaseline | undefined;

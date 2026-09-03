@@ -4,14 +4,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import {
-	SUBAGENT_CHILD_AGENT_ENV,
-	SUBAGENT_CHILD_INDEX_ENV,
-	SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV,
-	SUBAGENT_ORCHESTRATOR_TARGET_ENV,
-	SUBAGENT_RUN_ID_ENV,
-	SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV,
-} from "../runs/shared/pi-args.ts";
+import { readChildRuntimeConfigFromEnv, type ChildSupervisorConfig } from "../runs/shared/child-runtime-config.ts";
 import { INTERCOM_DETACH_REQUEST_EVENT, POLL_INTERVAL_MS, TEMP_ROOT_DIR, type ControlEvent, type IntercomEventBus, type SubagentState } from "../shared/types.ts";
 import { writeAtomicJson } from "../shared/atomic-json.ts";
 import { shouldUseNativeFsWatch } from "../shared/watch-strategy.ts";
@@ -124,37 +117,6 @@ function replyPath(channelDir: string, requestId: string): string {
 	return path.join(channelDir, REPLIES_DIR, `${safeSegment(requestId)}.json`);
 }
 
-function readTextEnv(name: string): string | undefined {
-	const value = process.env[name]?.trim();
-	return value ? value : undefined;
-}
-
-function readChildMetadata(): {
-	channelDir: string;
-	runId: string;
-	agent: string;
-	childIndex: number;
-	orchestratorTarget?: string;
-	orchestratorSessionId?: string;
-	childTarget?: string;
-} | undefined {
-	const channelDir = readTextEnv(SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV);
-	const runId = readTextEnv(SUBAGENT_RUN_ID_ENV);
-	const agent = readTextEnv(SUBAGENT_CHILD_AGENT_ENV);
-	const rawIndex = readTextEnv(SUBAGENT_CHILD_INDEX_ENV);
-	const orchestratorSessionId = readTextEnv(SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV);
-	if (!channelDir || !runId || !agent || !orchestratorSessionId || rawIndex === undefined || !/^\d+$/.test(rawIndex)) return undefined;
-	return {
-		channelDir,
-		runId,
-		agent,
-		childIndex: Number(rawIndex),
-		orchestratorTarget: readTextEnv(SUBAGENT_ORCHESTRATOR_TARGET_ENV),
-		orchestratorSessionId,
-		childTarget: readTextEnv("PI_SUBAGENT_INTERCOM_SESSION_NAME"),
-	};
-}
-
 function reasonHeading(reason: SupervisorReason): string {
 	if (reason === "interview_request") return "Subagent requests a structured supervisor interview.";
 	if (reason === "progress_update") return "Subagent progress update.";
@@ -242,9 +204,7 @@ async function waitForReply(channelDir: string, requestId: string, deadline: num
 	throw new Error("Timed out waiting for supervisor reply.");
 }
 
-async function sendSupervisorRequest(params: ContactSupervisorParams, signal?: AbortSignal, toolCallId?: string): Promise<AgentToolResult<Record<string, unknown>>> {
-	const metadata = readChildMetadata();
-	if (!metadata) throw new Error("Native supervisor channel is not available for this subagent.");
+async function sendSupervisorRequest(params: ContactSupervisorParams, signal: AbortSignal | undefined, metadata: ChildSupervisorConfig, toolCallId?: string): Promise<AgentToolResult<Record<string, unknown>>> {
 	if (params.reason !== "progress_update" && !params.message?.trim() && params.reason !== "interview_request") {
 		throw new Error("message is required for supervisor decisions.");
 	}
@@ -310,15 +270,15 @@ function hasTool(pi: ExtensionAPI, name: string): boolean {
 	}
 }
 
-export function registerNativeSupervisorClient(pi: ExtensionAPI): void {
-	if (!readChildMetadata() || hasTool(pi, "contact_supervisor")) return;
+export function registerNativeSupervisorClient(pi: ExtensionAPI, metadata = readChildRuntimeConfigFromEnv(process.env).supervisor): void {
+	if (!metadata || hasTool(pi, "contact_supervisor")) return;
 	const tool: ToolDefinition<typeof ContactSupervisorParamsSchema, Record<string, unknown>> = {
 		name: "contact_supervisor",
 		label: "Contact Supervisor",
 		description: "Contact the parent/supervisor session for a blocking decision, structured interview, or progress update.",
 		parameters: ContactSupervisorParamsSchema,
 		execute(id, params, signal) {
-			return sendSupervisorRequest(params as ContactSupervisorParams, signal, id);
+			return sendSupervisorRequest(params as ContactSupervisorParams, signal, metadata, id);
 		},
 	};
 	pi.registerTool(tool);

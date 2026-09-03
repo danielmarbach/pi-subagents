@@ -4,38 +4,30 @@ import * as path from "node:path";
 import type { BeforeProviderRequestEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerNativeSupervisorClient } from "../../intercom/native-supervisor-channel.ts";
 import { shouldUseNativeFsWatch } from "../../shared/watch-strategy.ts";
-import { decodePermissionRules, permissionDecision, PERMISSION_AUDIT_PATH_ENV, PERMISSION_POLICY_ENV } from "./permissions.ts";
+import { permissionDecision } from "./permissions.ts";
 import { consumeSteerRequestsFromDir, MAX_STEER_QUEUE_SIZE, steerAckPathFromDir, writeSteerAckAt, writeSteerCapabilityAt, writeSteerRequestToDir, type SteerDeliveryStatus, type SteerRequest } from "../background/control-channel.ts";
-import { SUBAGENT_CHILD_AGENT_ENV, SUBAGENT_CHILD_INDEX_ENV, SUBAGENT_FANOUT_CHILD_ENV, SUBAGENT_FORK_CACHE_KEY_ENV, SUBAGENT_INHERIT_GLOBAL_CONTEXT_ENV, SUBAGENT_STEER_ACK_DIR_ENV, SUBAGENT_STEER_CAPABILITY_ENV, SUBAGENT_STEER_INBOX_ENV } from "./pi-args.ts";
-import { RUNTIME_EXTENSION_ACK_EVENT, RUNTIME_EXTENSION_ACK_PATH_ENV, isRuntimeAcknowledgedExtensionId, writeRuntimeAcknowledgedExtensions } from "./runtime-acknowledged-extensions.ts";
-import { createStructuredOutputToolParameters, MISSING_STRUCTURED_ACCEPTANCE_REPORT_ERROR, STRUCTURED_OUTPUT_ACCEPTANCE_CAPTURE_ENV, STRUCTURED_OUTPUT_ACCEPTANCE_REQUIRED_ENV, STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV, validateStructuredOutputValue } from "./structured-output.ts";
+import { readChildRuntimeConfigFromEnv, type ChildRuntimeConfig } from "./child-runtime-config.ts";
+import { RUNTIME_EXTENSION_ACK_EVENT, isRuntimeAcknowledgedExtensionId, writeRuntimeAcknowledgedExtensions } from "./runtime-acknowledged-extensions.ts";
+import { createStructuredOutputToolParameters, MISSING_STRUCTURED_ACCEPTANCE_REPORT_ERROR, validateStructuredOutputValue } from "./structured-output.ts";
 import { validateAcceptanceReport } from "./acceptance.ts";
 import {
-	CHILD_TOOL_DIAGNOSTIC_PATH_ENV,
 	formatChildToolDiagnostic,
-	MCP_DIRECT_CHILD_TOOLS_ENV,
-	REQUIRED_CHILD_TOOLS_ENV,
 	writeChildToolDiagnostic,
 	type ChildToolDiagnostic,
 } from "./tool-availability.ts";
-import { TOOL_BUDGET_ENV, TOOL_BUDGET_ZERO_AUTH_ENV, decodeToolBudgetEnv, shouldBlockToolForBudget, toolBudgetBlockedMessage, toolBudgetSoftNudge } from "./tool-budget.ts";
+import { shouldBlockToolForBudget, toolBudgetBlockedMessage, toolBudgetSoftNudge } from "./tool-budget.ts";
 import type { JsonSchemaObject, ResolvedToolBudget, SubagentState } from "../../shared/types.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { getAgentDir, resolveWatchPath } from "../../shared/utils.ts";
 import { registerChildWatchdog } from "../../watchdog/register-child.ts";
-import { CHILD_WATCHDOG_CONFIG_ENV, decodeChildWatchdogConfig } from "../../watchdog/child-status.ts";
 import { requestWatchdogPermission, type WatchdogPermissionRequest, type WatchdogPermissionResult } from "../../watchdog/permission-arbiter.ts";
 import { SUBAGENT_WATCHDOG_WARNING_TYPE } from "../../watchdog/types.ts";
-import { resolveWaitToolConfig } from "../background/wait-config.ts";
 import { registerWaitTool } from "../background/wait-tool.ts";
 import { drainOutstandingWork } from "../background/auto-drain.ts";
 
-const SUBAGENT_INHERIT_PROJECT_CONTEXT_ENV = "PI_SUBAGENT_INHERIT_PROJECT_CONTEXT";
-const SUBAGENT_INHERIT_SKILLS_ENV = "PI_SUBAGENT_INHERIT_SKILLS";
-export const SUBAGENT_INTERCOM_SESSION_NAME_ENV = "PI_SUBAGENT_INTERCOM_SESSION_NAME";
+export { SUBAGENT_INTERCOM_SESSION_NAME_ENV, SUBAGENT_SESSION_NAME_ENV } from "./child-runtime-config.ts";
 /** Human-readable child display name (agent + task excerpt) set by the parent
  *  at launch; applied via pi.setSessionName when no intercom target exists. */
-export const SUBAGENT_SESSION_NAME_ENV = "PI_SUBAGENT_SESSION_NAME";
 const STEERING_LEGACY_SETTLE_FALLBACK_MS = 1000;
 const STEERING_SAFETY_POLL_INTERVAL_MS = 5000;
 
@@ -77,44 +69,16 @@ const PROJECT_CONTEXT_LEGACY_HEADER = "\n\n# Project Context\n\nProject-specific
 const SKILLS_HEADER = "\n\nThe following skills provide specialized instructions for specific tasks.";
 const DATE_HEADER = "\nCurrent date:";
 
-function readBooleanEnv(name: string): boolean | undefined {
-	const value = process.env[name];
-	if (value === undefined) return undefined;
-	return value !== "0";
-}
-
-function readRequiredChildTools(): string[] | undefined {
-	const encoded = process.env[REQUIRED_CHILD_TOOLS_ENV]?.trim();
-	if (!encoded) return undefined;
-	const required = JSON.parse(encoded) as unknown;
-	if (!Array.isArray(required) || required.some((name) => typeof name !== "string" || !name)) {
-		throw new Error(`Invalid ${REQUIRED_CHILD_TOOLS_ENV} payload.`);
-	}
-	return required;
-}
-
-function readMcpDirectChildTools(): string[] | undefined {
-	const encoded = process.env[MCP_DIRECT_CHILD_TOOLS_ENV]?.trim();
-	if (!encoded) return undefined;
-	try {
-		const tools = JSON.parse(encoded) as unknown;
-		if (!Array.isArray(tools) || tools.some((name) => typeof name !== "string" || !name)) return undefined;
-		return tools;
-	} catch {
-		return undefined;
-	}
-}
-
-function refreshChildToolDiagnostic(pi: ExtensionAPI): ChildToolDiagnostic | undefined {
-	const filePath = process.env[CHILD_TOOL_DIAGNOSTIC_PATH_ENV]?.trim();
-	const required = readRequiredChildTools();
+function refreshChildToolDiagnostic(pi: ExtensionAPI, config: ChildRuntimeConfig): ChildToolDiagnostic | undefined {
+	const filePath = config.childToolDiagnosticPath;
+	const required = config.requiredChildTools;
 	if (!filePath || !required) return undefined;
 	const available = pi.getAllTools().map((tool) => tool.name);
-	return writeChildToolDiagnostic(filePath, required, available, process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim(), readMcpDirectChildTools());
+	return writeChildToolDiagnostic(filePath, required, available, config.childAgent, config.mcpDirectChildTools);
 }
 
-function registerRuntimeExtensionAcknowledgements(pi: ExtensionAPI): void {
-	const outputPath = process.env[RUNTIME_EXTENSION_ACK_PATH_ENV]?.trim();
+function registerRuntimeExtensionAcknowledgements(pi: ExtensionAPI, config: ChildRuntimeConfig): void {
+	const outputPath = config.runtimeAcknowledgementPath;
 	if (!outputPath) return;
 	const ids: string[] = [];
 	let finalized = false;
@@ -252,7 +216,7 @@ function stripChildBoundaryInstructions(prompt: string): string {
 
 export function rewriteSubagentPrompt(
 	prompt: string,
-	options: { inheritProjectContext: boolean; inheritGlobalContext: boolean; inheritSkills: boolean; fanoutChild?: boolean },
+	options: { inheritProjectContext: boolean; inheritGlobalContext: boolean; inheritSkills: boolean; fanoutChild?: boolean; structuredOutputCapture?: boolean },
 ): string {
 	let rewritten = prompt;
 	if (!options.inheritProjectContext) {
@@ -267,7 +231,9 @@ export function rewriteSubagentPrompt(
 	rewritten = stripSubagentOrchestrationSkill(rewritten);
 	rewritten = stripChildBoundaryInstructions(rewritten);
 	const boundary = options.fanoutChild ? CHILD_FANOUT_BOUNDARY_INSTRUCTIONS : CHILD_SUBAGENT_BOUNDARY_INSTRUCTIONS;
-	const structured = process.env[STRUCTURED_OUTPUT_CAPTURE_ENV] ? `\n\n${STRUCTURED_OUTPUT_INSTRUCTIONS}` : "";
+	const structuredOutputCapture = options.structuredOutputCapture
+		?? Boolean(readChildRuntimeConfigFromEnv(process.env).structuredOutputCapturePath);
+	const structured = structuredOutputCapture ? `\n\n${STRUCTURED_OUTPUT_INSTRUCTIONS}` : "";
 	return `${boundary}${structured}\n\n${rewritten}`;
 }
 
@@ -303,8 +269,8 @@ const PROMPT_CACHE_KEY_APIS = new Set([
 	"openai-responses",
 ]);
 
-export function rewriteForkCacheProviderRequest(event: BeforeProviderRequestEvent, ctx?: Pick<ExtensionContext, "model">): unknown {
-	const forkCacheKey = process.env[SUBAGENT_FORK_CACHE_KEY_ENV]?.trim();
+export function rewriteForkCacheProviderRequest(event: BeforeProviderRequestEvent, ctx?: Pick<ExtensionContext, "model">, configuredForkCacheKey?: string): unknown {
+	const forkCacheKey = configuredForkCacheKey ?? readChildRuntimeConfigFromEnv(process.env).forkCacheKey;
 	if (!forkCacheKey || !PROMPT_CACHE_KEY_APIS.has(ctx?.model?.api ?? "")) return undefined;
 	if (!event || typeof event !== "object") return undefined;
 	const payload = event.payload;
@@ -348,8 +314,8 @@ function stripAssistantSubagentToolCallBlocks(message: unknown): unknown | undef
 	return { ...m, content: filteredContent };
 }
 
-export function stripParentOnlySubagentMessages(messages: unknown[], options: { sanitizeToolIds?: boolean } = {}): unknown[] {
-	const preserveCurrentFanoutToolHistory = process.env[SUBAGENT_FANOUT_CHILD_ENV] === "1";
+export function stripParentOnlySubagentMessages(messages: unknown[], options: { sanitizeToolIds?: boolean; fanoutChild?: boolean } = {}): unknown[] {
+	const preserveCurrentFanoutToolHistory = options.fanoutChild ?? readChildRuntimeConfigFromEnv(process.env).fanoutChild;
 	const sanitizeToolIds = options.sanitizeToolIds ?? true;
 	let changed = false;
 	const filtered: unknown[] = [];
@@ -380,11 +346,12 @@ export function formatSteerMessage(request: SteerRequest): string {
 	].join("\n");
 }
 
-export function registerPermissionGate(
+function registerPermissionGateWithConfig(
 	pi: ExtensionAPI,
+	config: ChildRuntimeConfig,
 	requestPermission: (request: WatchdogPermissionRequest) => Promise<WatchdogPermissionResult> = requestWatchdogPermission,
 ): void {
-	const rules = decodePermissionRules(process.env[PERMISSION_POLICY_ENV]);
+	const rules = config.permissionRules;
 	if (!rules) return;
 	const onRuntimeEvent = pi.on as unknown as (event: string, handler: (event: { toolName?: string; input?: unknown }, ctx: ExtensionContext) => unknown) => void;
 	onRuntimeEvent("tool_call", async (event, ctx) => {
@@ -392,13 +359,8 @@ export function registerPermissionGate(
 		const decision = permissionDecision(rules, toolName);
 		if (decision === "allow") return undefined;
 		if (decision === "deny") return { block: true, reason: `Blocked by pi-subagents permission rule: '${toolName}' is denied.` };
-		const rawWatchdogConfig = process.env[CHILD_WATCHDOG_CONFIG_ENV];
-		let timeoutMs = 30_000;
-		try {
-			timeoutMs = decodeChildWatchdogConfig(rawWatchdogConfig)?.agentEndTimeoutMs ?? timeoutMs;
-		} catch {
-			// The arbiter reports invalid configuration with the concrete decode error.
-		}
+		const rawWatchdogConfig = config.childWatchdogRaw;
+		const timeoutMs = config.childWatchdog?.agentEndTimeoutMs ?? 30_000;
 		if (ctx.signal?.aborted) return { block: true, reason: "Blocked by pi-subagents permission rule: Watchdog permission decision was cancelled." };
 		let timeout: ReturnType<typeof setTimeout> | undefined;
 		let abort: (() => void) | undefined;
@@ -410,7 +372,7 @@ export function registerPermissionGate(
 					toolName,
 					args: event.input ?? {},
 					rawWatchdogConfig,
-					auditPath: process.env[PERMISSION_AUDIT_PATH_ENV],
+					auditPath: config.permissionAuditPath,
 					...(ctx.signal ? { signal: ctx.signal } : {}),
 				}),
 				new Promise<WatchdogPermissionResult>((resolve) => {
@@ -430,6 +392,13 @@ export function registerPermissionGate(
 		if (result.approved) return undefined;
 		return { block: true, reason: `Blocked by pi-subagents permission rule: ${result.reason}` };
 	});
+}
+
+export function registerPermissionGate(
+	pi: ExtensionAPI,
+	requestPermission: (request: WatchdogPermissionRequest) => Promise<WatchdogPermissionResult> = requestWatchdogPermission,
+): void {
+	registerPermissionGateWithConfig(pi, readChildRuntimeConfigFromEnv(process.env), requestPermission);
 }
 
 function registerToolBudget(pi: ExtensionAPI, budget: ResolvedToolBudget | undefined): void {
@@ -464,13 +433,15 @@ export function registerSteeringInbox(
 		platform?: NodeJS.Platform;
 		timers?: Pick<typeof globalThis, "setInterval" | "clearInterval">;
 	} = {},
+	config?: ChildRuntimeConfig,
 ): void {
-	const steerInbox = process.env[SUBAGENT_STEER_INBOX_ENV]?.trim();
+	const runtimeConfig = config ?? readChildRuntimeConfigFromEnv(process.env);
+	const steerInbox = runtimeConfig.steerInbox;
 	if (!steerInbox) return;
-	const capabilityPath = process.env[SUBAGENT_STEER_CAPABILITY_ENV]?.trim();
-	const ackDir = process.env[SUBAGENT_STEER_ACK_DIR_ENV]?.trim();
+	const capabilityPath = runtimeConfig.steerCapabilityPath;
+	const ackDir = runtimeConfig.steerAckDir;
 	const sendUserMessage = (pi as { sendUserMessage?: (content: string, options?: { deliverAs: "steer" | "followUp" }) => unknown }).sendUserMessage;
-	const childIndex = Number(process.env[SUBAGENT_CHILD_INDEX_ENV]);
+	const childIndex = runtimeConfig.childIndex ?? Number.NaN;
 	const pending = new Map<string, Array<{ request: SteerRequest; deliveryStatus: SteerDeliveryStatus }>>();
 	const queued: Array<{ request: SteerRequest; ready: boolean }> = [];
 	let disposed = false;
@@ -686,13 +657,13 @@ export function registerSteeringInbox(
 	});
 }
 
-export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
-	registerRuntimeExtensionAcknowledgements(pi);
-	registerSteeringInbox(pi);
-	registerPermissionGate(pi);
-	registerToolBudget(pi, decodeToolBudgetEnv(process.env[TOOL_BUDGET_ENV], { allowZero: process.env[TOOL_BUDGET_ZERO_AUTH_ENV] === "1" }));
-	registerChildWatchdog(pi);
-	const waitToolConfig = resolveWaitToolConfig();
+export function registerSubagentPromptRuntimeWithConfig(pi: ExtensionAPI, config: ChildRuntimeConfig): void {
+	registerRuntimeExtensionAcknowledgements(pi, config);
+	registerSteeringInbox(pi, {}, config);
+	registerPermissionGateWithConfig(pi, config);
+	registerToolBudget(pi, config.toolBudget);
+	if (config.childWatchdog) registerChildWatchdog(pi, config.childWatchdog);
+	const waitToolConfig = config.waitTool;
 	const waitState = {
 		baseCwd: "",
 		currentSessionId: null,
@@ -712,7 +683,7 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 	const registerNativeSupervisorClientOnce = (): void => {
 		if (nativeSupervisorClientRegistered) return;
 		nativeSupervisorClientRegistered = true;
-		registerNativeSupervisorClient(pi);
+		if (config.supervisor) registerNativeSupervisorClient(pi, config.supervisor);
 	};
 	const onRuntimeEvent = pi.on as unknown as (event: string, handler: (event: unknown, ctx?: ExtensionContext) => unknown) => void;
 	onRuntimeEvent("session_start", (_event: unknown, ctx?: ExtensionContext) => {
@@ -721,17 +692,17 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 		registerNativeSupervisorClientOnce();
 	});
 	onRuntimeEvent("agent_start", () => {
-		const diagnostic = refreshChildToolDiagnostic(pi);
+		const diagnostic = refreshChildToolDiagnostic(pi, config);
 		if (diagnostic) throw new Error(formatChildToolDiagnostic(diagnostic));
 	});
 	onRuntimeEvent("agent_end", async (_event: unknown, ctx: unknown) => {
 		if ((ctx as { hasUI?: boolean } | undefined)?.hasUI === true) return;
 		await drainOutstandingWork({ state: waitState, events: pi.events });
 	});
-	const structuredOutputPath = process.env[STRUCTURED_OUTPUT_CAPTURE_ENV];
-	const structuredAcceptanceReportPath = process.env[STRUCTURED_OUTPUT_ACCEPTANCE_CAPTURE_ENV];
-	const structuredAcceptanceReportRequired = process.env[STRUCTURED_OUTPUT_ACCEPTANCE_REQUIRED_ENV] === "1";
-	const structuredSchemaPath = process.env[STRUCTURED_OUTPUT_SCHEMA_ENV];
+	const structuredOutputPath = config.structuredOutputCapturePath;
+	const structuredAcceptanceReportPath = config.structuredOutputAcceptanceCapturePath;
+	const structuredAcceptanceReportRequired = config.structuredOutputAcceptanceRequired;
+	const structuredSchemaPath = config.structuredOutputSchemaPath;
 	if (structuredOutputPath && structuredSchemaPath) {
 		const schema = JSON.parse(fs.readFileSync(structuredSchemaPath, "utf-8")) as JsonSchemaObject;
 		const acceptanceReportMode = structuredAcceptanceReportPath
@@ -781,12 +752,13 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 		});
 	}
 
-	onRuntimeEvent("before_provider_request", (event: unknown, ctx?: ExtensionContext) => rewriteForkCacheProviderRequest(event as BeforeProviderRequestEvent, ctx));
+	onRuntimeEvent("before_provider_request", (event: unknown, ctx?: ExtensionContext) => rewriteForkCacheProviderRequest(event as BeforeProviderRequestEvent, ctx, config.forkCacheKey));
 
 	onRuntimeEvent("context", (event: unknown, ctx?: ExtensionContext) => {
 		if (!event || typeof event !== "object" || !("messages" in event) || !Array.isArray(event.messages)) return undefined;
 		const messages = stripParentOnlySubagentMessages(event.messages, {
 			sanitizeToolIds: !COMPOSITE_TOOL_ID_APIS.has(ctx?.model?.api ?? ""),
+			fanoutChild: config.fanoutChild,
 		});
 		if (messages === event.messages) return undefined;
 		return { messages };
@@ -798,17 +770,17 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 		// The intercom target is a routing address and always wins; the display
 		// name (agent + task excerpt, computed by the parent at launch) only
 		// applies when the bridge is not addressing this child.
-		const intercomSessionName = process.env[SUBAGENT_INTERCOM_SESSION_NAME_ENV]?.trim();
-		const displaySessionName = process.env[SUBAGENT_SESSION_NAME_ENV]?.trim();
+		const intercomSessionName = config.intercomSessionName;
+		const displaySessionName = config.sessionName;
 		const childSessionName = intercomSessionName || displaySessionName;
 		if (childSessionName && typeof pi.setSessionName === "function") {
 			pi.setSessionName(childSessionName);
 		}
 
-		const inheritProjectContext = readBooleanEnv(SUBAGENT_INHERIT_PROJECT_CONTEXT_ENV);
-		const inheritGlobalContext = readBooleanEnv(SUBAGENT_INHERIT_GLOBAL_CONTEXT_ENV);
-		const inheritSkills = readBooleanEnv(SUBAGENT_INHERIT_SKILLS_ENV);
-		const fanoutChild = readBooleanEnv(SUBAGENT_FANOUT_CHILD_ENV);
+		const inheritProjectContext = config.inheritProjectContext;
+		const inheritGlobalContext = config.inheritGlobalContext;
+		const inheritSkills = config.inheritSkills;
+		const fanoutChild = config.fanoutPromptBoundary;
 		let rewritten = event.systemPrompt;
 		if (inheritProjectContext !== undefined || inheritGlobalContext !== undefined || inheritSkills !== undefined || fanoutChild !== undefined) {
 			rewritten = rewriteSubagentPrompt(event.systemPrompt, {
@@ -816,9 +788,14 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 				inheritGlobalContext: inheritGlobalContext ?? true,
 				inheritSkills: inheritSkills ?? true,
 				fanoutChild: fanoutChild === true,
+				structuredOutputCapture: Boolean(config.structuredOutputCapturePath),
 			});
 		}
 		if (rewritten === event.systemPrompt) return;
 		return { systemPrompt: rewritten };
 	});
+}
+
+export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
+	registerSubagentPromptRuntimeWithConfig(pi, readChildRuntimeConfigFromEnv(process.env));
 }

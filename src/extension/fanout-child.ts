@@ -5,8 +5,9 @@ import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-age
 import { discoverAgents } from "../agents/agents.ts";
 import { getArtifactsDir } from "../shared/artifacts.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
-import { resolveWaitToolConfig } from "../runs/background/wait-config.ts";
-import { SUBAGENT_CHILD_ENV, SUBAGENT_FANOUT_CHILD_ENV } from "../runs/shared/pi-args.ts";
+import { resolveWaitToolConfig, WAIT_TOOL_DEFAULT_TIMEOUT_MS_ENV, WAIT_TOOL_ENABLED_ENV } from "../runs/background/wait-config.ts";
+import { SUBAGENT_PARENT_CAPABILITY_TOKEN_ENV, SUBAGENT_PARENT_CONTROL_INBOX_ENV, SUBAGENT_PARENT_EVENT_SINK_ENV, SUBAGENT_PARENT_ROOT_RUN_ID_ENV } from "../runs/shared/pi-args.ts";
+import { readChildRuntimeConfigFromEnv, type ChildRuntimeConfig } from "../runs/shared/child-runtime-config.ts";
 import { readNestedControlRequests, resolveNestedRouteFromEnv, type NestedRoute, writeNestedControlResult } from "../runs/shared/nested-events.ts";
 import { deliverSubagentIntercomMessageEvent } from "../intercom/result-intercom.ts";
 import { resolveSubagentIntercomTarget } from "../intercom/intercom-bridge.ts";
@@ -51,9 +52,15 @@ function createChildSafeState(): SubagentState {
 	};
 }
 
-function resolveNestedControlRoute(): NestedRoute | undefined {
+function resolveNestedControlRoute(config: ChildRuntimeConfig): NestedRoute | undefined {
+	if (!config.nestedRoute) return undefined;
 	try {
-		return resolveNestedRouteFromEnv();
+		return resolveNestedRouteFromEnv({
+			[SUBAGENT_PARENT_ROOT_RUN_ID_ENV]: config.nestedRoute.rootRunId,
+			[SUBAGENT_PARENT_EVENT_SINK_ENV]: config.nestedRoute.eventSink,
+			[SUBAGENT_PARENT_CONTROL_INBOX_ENV]: config.nestedRoute.controlInbox,
+			[SUBAGENT_PARENT_CAPABILITY_TOKEN_ENV]: config.nestedRoute.capabilityToken,
+		});
 	} catch {
 		return undefined;
 	}
@@ -145,8 +152,8 @@ function startNestedControlInboxListener(pi: ExtensionAPI, state: SubagentState,
 	return () => clearInterval(timer);
 }
 
-export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI): void {
-	if (process.env[SUBAGENT_CHILD_ENV] !== "1" || process.env[SUBAGENT_FANOUT_CHILD_ENV] !== "1") return;
+export function registerFanoutChildSubagentExtensionWithConfig(pi: ExtensionAPI, childRuntimeConfig: ChildRuntimeConfig): void {
+	if (!childRuntimeConfig.child || !childRuntimeConfig.fanoutChild) return;
 
 	const globalStore = globalThis as Record<string, unknown>;
 	const registeredKey = "__piSubagentFanoutChildRegisteredApis";
@@ -158,7 +165,11 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI): 
 	registeredApis.add(pi);
 
 	const config = loadConfig();
-	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
+	const waitToolEnv: Record<string, string | undefined> = {
+		[WAIT_TOOL_ENABLED_ENV]: childRuntimeConfig.waitToolEnabledEnv,
+		[WAIT_TOOL_DEFAULT_TIMEOUT_MS_ENV]: childRuntimeConfig.waitToolDefaultTimeoutMsEnv,
+	};
+	const waitToolConfig = resolveWaitToolConfig(config.waitTool, waitToolEnv);
 	const state = createChildSafeState();
 	const executor = createSubagentExecutor({
 		pi,
@@ -190,7 +201,7 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI): 
 	};
 
 	pi.registerTool(tool);
-	const route = resolveNestedControlRoute();
+	const route = resolveNestedControlRoute(childRuntimeConfig);
 	if (!route) return;
 	const listenerCleanupKey = "__piSubagentFanoutChildNestedControlInboxCleanups";
 	const listenerCleanups = globalStore[listenerCleanupKey] instanceof Map
@@ -202,4 +213,8 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI): 
 	previous?.cleanup();
 	const inboxState = previous?.state ?? createNestedControlInboxState();
 	listenerCleanups.set(routeKey, { state: inboxState, cleanup: startNestedControlInboxListener(pi, state, route, inboxState) });
+}
+
+export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI): void {
+	registerFanoutChildSubagentExtensionWithConfig(pi, readChildRuntimeConfigFromEnv(process.env));
 }

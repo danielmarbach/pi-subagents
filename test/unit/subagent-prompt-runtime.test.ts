@@ -1450,6 +1450,8 @@ describe("subagent prompt runtime", () => {
 
 	it("rewrites the final child-visible prompt through before_agent_start", async () => {
 		let beforeAgentStart: ((event: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>) | undefined;
+		process.env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT = "0";
+		process.env.PI_SUBAGENT_INHERIT_SKILLS = "0";
 		registerSubagentPromptRuntime({
 			on(event: string, handler: (payload: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>) {
 				if (event === "before_agent_start") beforeAgentStart = handler;
@@ -1458,9 +1460,6 @@ describe("subagent prompt runtime", () => {
 		} as { on(event: string, handler: (payload: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>): void; getAllTools(): Array<{ name: string }> });
 
 		assert.ok(beforeAgentStart, "expected before_agent_start handler");
-		process.env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT = "0";
-		process.env.PI_SUBAGENT_INHERIT_SKILLS = "0";
-
 		const rewritten = await beforeAgentStart?.({ systemPrompt: BASE_PROMPT });
 		assert.ok(rewritten);
 		assert.ok(!rewritten.systemPrompt.includes("# Project Context"));
@@ -1470,16 +1469,15 @@ describe("subagent prompt runtime", () => {
 
 	it("uses the fanout boundary through before_agent_start when fanout env is set", async () => {
 		let beforeAgentStart: ((event: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>) | undefined;
+		process.env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT = "1";
+		process.env.PI_SUBAGENT_INHERIT_SKILLS = "1";
+		process.env[SUBAGENT_FANOUT_CHILD_ENV] = "1";
 		registerSubagentPromptRuntime({
 			on(event: string, handler: (payload: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>) {
 				if (event === "before_agent_start") beforeAgentStart = handler;
 			},
 			getAllTools: () => [{ name: "intercom" }, { name: "contact_supervisor" }],
 		} as { on(event: string, handler: (payload: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>): void; getAllTools(): Array<{ name: string }> });
-
-		process.env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT = "1";
-		process.env.PI_SUBAGENT_INHERIT_SKILLS = "1";
-		process.env[SUBAGENT_FANOUT_CHILD_ENV] = "1";
 
 		const rewritten = await beforeAgentStart?.({ systemPrompt: BASE_PROMPT });
 		assert.ok(rewritten);
