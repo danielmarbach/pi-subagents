@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import * as path from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { truncateHead } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 
 export const WATCHDOG_DIFF_TOOL_NAME = "watchdog_diff";
@@ -47,7 +48,12 @@ function validatePath(value: string | undefined): string | undefined {
 function bound(text: string): string {
 	if (text.length <= WATCHDOG_DIFF_MAX_CHARS) return text;
 	const marker = `\n\n[... ${text.length - WATCHDOG_DIFF_MAX_CHARS} characters omitted; call again with a narrower path ...]`;
-	return `${text.slice(0, WATCHDOG_DIFF_MAX_CHARS - marker.length)}${marker}`;
+	// Pi returns bounded content without a marker; keep the watchdog's actionable marker.
+	const content = truncateHead(text, {
+		maxLines: Number.MAX_SAFE_INTEGER,
+		maxBytes: WATCHDOG_DIFF_MAX_CHARS - marker.length,
+	}).content;
+	return `${content}${marker}`;
 }
 
 /** In a shared cwd, changes already pending when the session started also appear. */

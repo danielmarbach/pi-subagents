@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateHead, truncateTail, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { computeWatchdogRepoChangeSignature, eventIndicatesRepoEdit, type WatchdogRepoChangeSignature } from "./change-signature.ts";
 import { WatchdogEmissionGuard } from "./emission-guard.ts";
 import {
@@ -98,9 +98,19 @@ const REVIEW_DELTA_SEPARATOR = "\n\n---\n\n";
 
 export function boundWatchdogReviewText(text: string, cap = MAX_REVIEW_INPUT_CHARS): string {
 	if (text.length <= cap) return text;
-	const head = Math.min(REVIEW_INPUT_HEAD_CHARS, Math.floor(cap / 4));
+	const headLimit = Math.min(REVIEW_INPUT_HEAD_CHARS, Math.floor(cap / 4));
 	const marker = `\n\n[... about ${text.length - cap} characters omitted ...]\n\n`;
-	return `${text.slice(0, head)}${marker}${text.slice(text.length - (cap - head - marker.length))}`;
+	// Pi's helpers preserve complete lines and return no marker, so retain the watchdog marker here.
+	const contentLimit = Math.max(0, cap - Buffer.byteLength(marker, "utf-8"));
+	const head = truncateHead(text, {
+		maxLines: Number.MAX_SAFE_INTEGER,
+		maxBytes: headLimit,
+	}).content;
+	const tail = truncateTail(text, {
+		maxLines: Number.MAX_SAFE_INTEGER,
+		maxBytes: Math.max(0, contentLimit - Buffer.byteLength(head, "utf-8")),
+	}).content;
+	return `${head}${marker}${tail}`;
 }
 
 function errorMessage(error: unknown): string {

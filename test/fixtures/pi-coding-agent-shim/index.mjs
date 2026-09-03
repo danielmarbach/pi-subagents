@@ -13,6 +13,50 @@ export function convertToLlm(value) { return value; }
 export function createReadOnlyTools() {
 	return ["read", "grep", "find", "ls"].map((name) => ({ name }));
 }
+
+const DEFAULT_MAX_LINES = 2000;
+const DEFAULT_MAX_BYTES = 50 * 1024;
+
+function splitLinesForCounting(content) {
+	if (content.length === 0) return [];
+	const lines = content.split("\n");
+	if (content.endsWith("\n")) lines.pop();
+	return lines;
+}
+
+function truncateStringToBytesFromEnd(value, maxBytes) {
+	const bytes = Buffer.from(value, "utf-8");
+	if (bytes.length <= maxBytes) return value;
+	let start = bytes.length - maxBytes;
+	while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+	return bytes.subarray(start).toString("utf-8");
+}
+
+function truncate(content, options, fromTail) {
+	const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
+	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+	const lines = splitLinesForCounting(content);
+	if (lines.length <= maxLines && Buffer.byteLength(content, "utf-8") <= maxBytes) return content;
+	if (!fromTail && Buffer.byteLength(lines[0] ?? "", "utf-8") > maxBytes) return "";
+	const output = [];
+	let outputBytes = 0;
+	for (let index = fromTail ? lines.length - 1 : 0; fromTail ? index >= 0 : index < lines.length; fromTail ? index-- : index++) {
+		if (output.length >= maxLines) break;
+		const line = lines[index];
+		const lineBytes = Buffer.byteLength(line, "utf-8") + (output.length > 0 ? 1 : 0);
+		if (outputBytes + lineBytes > maxBytes) {
+			if (fromTail && output.length === 0) output.unshift(truncateStringToBytesFromEnd(line, maxBytes));
+			break;
+		}
+		if (fromTail) output.unshift(line);
+		else output.push(line);
+		outputBytes += lineBytes;
+	}
+	return output.join("\n");
+}
+
+export function truncateHead(content, options = {}) { return { content: truncate(content, options, false) }; }
+export function truncateTail(content, options = {}) { return { content: truncate(content, options, true) }; }
 export function rawKeyHint(keys, label) { return `${keys} ${label}`; }
 export function keyHint(_binding, label) { return label; }
 
