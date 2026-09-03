@@ -77,7 +77,7 @@ Use codex-exec to analyze this change without editing files.
 Use codex-exec-writer to make the requested workspace changes.
 ```
 
-The adapter validates `codex --version` and `codex exec --help` only when a run launches. Discovery, list, status, and native Pi launches do not probe Codex. JSONL, stderr, and stdout are untrusted. A run succeeds only after bounded valid JSONL contains one `turn.completed` event and the bounded final-message artifact is present.
+The adapter validates `codex --version` and `codex exec --help` only when a run launches. Discovery, list, status, and native Pi launches do not execute Codex or its version/help probes. A capabilities listing performs only a passive PATH/PATHEXT/X_OK lookup and exposes the command as `runner.available`; that does not prove authentication or launch compatibility. JSONL, stderr, and stdout are untrusted. A run succeeds only after bounded valid JSONL contains one `turn.completed` event and the bounded final-message artifact is present.
 
 Maintainers can collect real smoke evidence without making it part of the normal test suite:
 
@@ -112,7 +112,7 @@ Use claude-code to analyze this handoff without editing files.
 Use claude-code-writer to make the requested file changes.
 ```
 
-The adapter validates `claude --version` and `claude --help` only when a run launches. Discovery, list, status, and native Pi launches do not probe Claude Code or authentication. JSONL, stderr, and stdout are untrusted. A run succeeds only after bounded valid JSONL contains exactly one successful terminal `result` with non-empty final text. Missing or revoked local authentication, limit stops, malformed JSON, duplicate terminal results, and EOF before a terminal result fail closed.
+The adapter validates `claude --version` and `claude --help` only when a run launches. Discovery, list, status, and native Pi launches do not execute Claude Code or probe authentication. A capabilities listing performs only a passive PATH/PATHEXT/X_OK lookup and exposes the command as `runner.available`; that does not prove authentication or launch compatibility. JSONL, stderr, and stdout are untrusted. A run succeeds only after bounded valid JSONL contains exactly one successful terminal `result` with non-empty final text. Missing or revoked local authentication, limit stops, malformed JSON, duplicate terminal results, and EOF before a terminal result fail closed.
 
 Maintainers can opt in to separate read-only and writer canaries:
 
@@ -141,7 +141,7 @@ Both adapters use stream JSON, the enabled sandbox, and the primary workspace. T
 
 The adapters do not pass force, yolo, auto-review, MCP approval, plugin, session resume, continue, worktree, or workspace trust flags. User profiles cannot add argv or workspace roots. The `cursor-agent` selection identity is reserved for the read-only adapter.
 
-Launch preflight validates `cursor-agent --version` and `cursor-agent --help` only when a run starts. Discovery, list, status, and native Pi launches do not execute Cursor or probe authentication. A run succeeds only when bounded valid JSONL ends with one successful `result` event that has non-empty final text. Error events, failed results, malformed JSON, output after the terminal event, and EOF before a result fail closed.
+Launch preflight validates `cursor-agent --version` and `cursor-agent --help` only when a run starts. Discovery, list, status, and native Pi launches do not execute Cursor or probe authentication. A capabilities listing performs only a passive PATH/PATHEXT/X_OK lookup and exposes the command as `runner.available`; that does not prove authentication or launch compatibility. A run succeeds only when bounded valid JSONL ends with one successful `result` event that has non-empty final text. Error events, failed results, malformed JSON, output after the terminal event, and EOF before a result fail closed.
 
 These headless smokes rely on saved workspace trust. Cursor documents no passive command that checks workspace trust, so the smoke cannot verify it before launch. The operator must use Cursor's interactive trust flow for the exact disposable workspace and the exact derived prompt directory, `<state-root>/external-0.cursor-prompt`. Keep that prompt directory after the trust step. It must be empty, owned by the operator who runs the smoke, and must not be a symlink. The harness preserves this directory but creates its private handoff with exclusive `0600` access and removes the handoff after every run. Repeat the trust setup if either exact path changes.
 

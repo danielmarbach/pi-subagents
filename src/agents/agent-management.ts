@@ -32,6 +32,7 @@ import { resolveSubagentModelOverride, type ParentModel } from "../runs/shared/m
 import { validateToolBudgetConfig } from "../runs/shared/tool-budget.ts";
 import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import { CODE_OWNED_EXTERNAL_CLI_ADAPTER_LABEL, isCodeOwnedExternalCliAdapterId, resolveExternalCliRunnerStatus, validateCodeOwnedProfileRunner } from "../runs/shared/external-cli-contract.ts";
+import { resolveExternalCliBinaryAvailability, type ExternalCliBinaryAvailability } from "../runs/shared/external-cli-preflight.ts";
 import type { AcceptanceInput, AgentCapabilitiesSnapshot, AgentCapabilityRow, Details, ExtensionConfig, ToolBudgetConfig } from "../shared/types.ts";
 import { getProjectConfigDir } from "../shared/utils.ts";
 import { previewDisplayText } from "../shared/display-text.ts";
@@ -704,17 +705,34 @@ function externalJobProviderSuffix(provider: string, names: Set<string> | undefi
 	return names.has(provider) ? "✓" : "missing";
 }
 
-function runnerListBadge(agent: AgentConfig, providerNames: Set<string> | undefined): string | undefined {
+type ExternalCliAvailabilityByCommand = ReadonlyMap<string, ExternalCliBinaryAvailability>;
+
+function externalCliAvailabilityForAgents(agents: readonly AgentConfig[]): ExternalCliAvailabilityByCommand {
+	const availability = new Map<string, ExternalCliBinaryAvailability>();
+	for (const agent of agents) {
+		const runner = agent.runner;
+		if (runner?.type === "external-cli" && !availability.has(runner.command)) {
+			availability.set(runner.command, resolveExternalCliBinaryAvailability(runner.command, process.env));
+		}
+	}
+	return availability;
+}
+
+function runnerListBadge(agent: AgentConfig, providerNames: Set<string> | undefined, externalCliAvailability?: ExternalCliAvailabilityByCommand): string | undefined {
 	if (agent.runner?.type === "external-job") return `external-job:${agent.runner.provider} ${externalJobProviderSuffix(agent.runner.provider, providerNames)}`;
-	if (agent.runner?.type === "external-cli") return "external-cli";
+	if (agent.runner?.type === "external-cli") {
+		const availability = externalCliAvailability?.get(agent.runner.command);
+		if (!availability) return "external-cli";
+		return `external-cli:${agent.runner.command} ${availability.available ? "✓" : "missing"}`;
+	}
 	return undefined;
 }
 
-function agentListMetadata(agent: AgentConfig, providerNames: Set<string> | undefined): string {
+function agentListMetadata(agent: AgentConfig, providerNames: Set<string> | undefined, externalCliAvailability?: ExternalCliAvailabilityByCommand): string {
 	const source = agent.source === "package" ? packageSourceLabel(agent) : agent.source;
 	return [
 		source,
-		runnerListBadge(agent, providerNames),
+		runnerListBadge(agent, providerNames, externalCliAvailability),
 		agent.defaultContext ? `context: ${agent.defaultContext}` : undefined,
 		agent.aliases?.length ? `aliases: ${agent.aliases.join(", ")}` : undefined,
 	].filter((part): part is string => Boolean(part)).join(", ");
@@ -724,7 +742,7 @@ function formatAgentListLine(agent: AgentConfig, providerNames: Set<string> | un
 	return `- ${agent.name} (${agentListMetadata(agent, providerNames)}): ${agent.description}`;
 }
 
-function formatAgentCapabilitiesLine(agent: AgentConfig, providerNames: Set<string> | undefined): string {
+function formatAgentCapabilitiesLine(agent: AgentConfig, providerNames: Set<string> | undefined, externalCliAvailability?: ExternalCliAvailabilityByCommand): string {
 	const declaredTools = [
 		...(agent.tools ?? []),
 		...(agent.mcpDirectTools ?? []).map((tool) => `mcp:${tool}`),
@@ -742,7 +760,7 @@ function formatAgentCapabilitiesLine(agent: AgentConfig, providerNames: Set<stri
 		if (agent.modelProvider && !agent.model.includes("/")) model = `${agent.modelProvider}/${agent.model}`;
 	}
 	const thinking = agent.thinking === false ? "off" : agent.thinking ?? "default";
-	return `- ${agent.name} (${agentListMetadata(agent, providerNames)}): Description: ${previewDisplayText(agent.description, 240)}; Tools: ${tools}; Model: ${model}; Thinking: ${thinking}`;
+	return `- ${agent.name} (${agentListMetadata(agent, providerNames, externalCliAvailability)}): Description: ${previewDisplayText(agent.description, 240)}; Tools: ${tools}; Model: ${model}; Thinking: ${thinking}`;
 }
 
 const EXTERNAL_JOB_CAPABILITIES = { stop: false, steer: false, resume: false, structuredOutput: false, toolEvents: false } as const;
@@ -752,10 +770,19 @@ function listOrEmpty<T>(values: T[] | undefined): T[] {
 	return values ?? [];
 }
 
-function agentCapabilityRunner(agent: AgentConfig, providerNames: Set<string> | undefined): AgentCapabilityRow["runner"] {
+function agentCapabilityRunner(agent: AgentConfig, providerNames: Set<string> | undefined, externalCliAvailability: ExternalCliAvailabilityByCommand): AgentCapabilityRow["runner"] {
 	const runner = agent.runner;
 	if (!runner || runner.type === "pi") return PI_AGENT_RUNNER;
-	if (runner.type === "external-cli") return { type: "external-cli", adapter: runner.adapter, capabilities: resolveExternalCliRunnerStatus(runner).capabilities };
+	if (runner.type === "external-cli") {
+		const availability = externalCliAvailability.get(runner.command)!;
+		return {
+			type: "external-cli",
+			adapter: runner.adapter,
+			command: runner.command,
+			...availability,
+			capabilities: resolveExternalCliRunnerStatus(runner).capabilities,
+		};
+	}
 	return { type: "external-job", provider: runner.provider, available: providerNames?.has(runner.provider), capabilities: EXTERNAL_JOB_CAPABILITIES };
 }
 
@@ -769,7 +796,7 @@ function agentCapabilityTools(agent: AgentConfig): AgentCapabilityRow["tools"] {
 	};
 }
 
-function agentCapabilityRow(agent: AgentConfig, options: { executable: boolean; providerNames?: Set<string>; restrictionSources?: string[] }): AgentCapabilityRow {
+function agentCapabilityRow(agent: AgentConfig, options: { executable: boolean; providerNames?: Set<string>; externalCliAvailability: ExternalCliAvailabilityByCommand; restrictionSources?: string[] }): AgentCapabilityRow {
 	return {
 		name: agent.name,
 		description: previewDisplayText(agent.description, 1000),
@@ -777,7 +804,7 @@ function agentCapabilityRow(agent: AgentConfig, options: { executable: boolean; 
 		executable: options.executable,
 		restrictionSources: options.executable ? undefined : options.restrictionSources ?? [],
 		aliases: agent.aliases ? [...agent.aliases] : undefined,
-		runner: agentCapabilityRunner(agent, options.providerNames),
+		runner: agentCapabilityRunner(agent, options.providerNames, options.externalCliAvailability),
 		tools: agentCapabilityTools(agent),
 		model: presentDetails({ value: agent.model, fallbackModels: agent.fallbackModels, thinking: agent.thinking }),
 		execution: presentDetails({ defaultAsync: agent.defaultAsync, timeoutMs: agent.defaultTimeoutMs }),
@@ -786,11 +813,11 @@ function agentCapabilityRow(agent: AgentConfig, options: { executable: boolean; 
 	};
 }
 
-function agentCapabilitiesSnapshot(input: { agents: AgentConfig[]; restrictedAgents: AgentConfig[]; providerNames?: Set<string>; restrictedSources?: string[] }): AgentCapabilitiesSnapshot {
+function agentCapabilitiesSnapshot(input: { agents: AgentConfig[]; restrictedAgents: AgentConfig[]; providerNames?: Set<string>; externalCliAvailability: ExternalCliAvailabilityByCommand; restrictedSources?: string[] }): AgentCapabilitiesSnapshot {
 	return {
 		agents: [
-			...input.agents.map((agent) => agentCapabilityRow(agent, { executable: true, providerNames: input.providerNames })),
-			...input.restrictedAgents.map((agent) => agentCapabilityRow(agent, { executable: false, providerNames: input.providerNames, restrictionSources: input.restrictedSources })),
+			...input.agents.map((agent) => agentCapabilityRow(agent, { executable: true, providerNames: input.providerNames, externalCliAvailability: input.externalCliAvailability })),
+			...input.restrictedAgents.map((agent) => agentCapabilityRow(agent, { executable: false, providerNames: input.providerNames, externalCliAvailability: input.externalCliAvailability, restrictionSources: input.restrictedSources })),
 		],
 		restrictedCount: input.restrictedAgents.length,
 		...(input.restrictedSources?.length ? { capabilityCeilingSources: [...input.restrictedSources] } : {}),
@@ -824,13 +851,14 @@ function appendAgentDiagnosticLines(lines: string[], diagnostics: AgentDiscovery
 	);
 }
 
-function agentCapabilityDetails(input: { capabilityMode: boolean; agents: AgentConfig[]; restrictedAgents: AgentConfig[]; providerNames?: Set<string>; restrictedSources?: string[] }): Partial<Details> | undefined {
+function agentCapabilityDetails(input: { capabilityMode: boolean; agents: AgentConfig[]; restrictedAgents: AgentConfig[]; providerNames?: Set<string>; externalCliAvailability: ExternalCliAvailabilityByCommand; restrictedSources?: string[] }): Partial<Details> | undefined {
 	if (!input.capabilityMode) return undefined;
 	return {
 		agentCapabilities: jsonDetails(agentCapabilitiesSnapshot({
 			agents: input.agents,
 			restrictedAgents: input.restrictedAgents,
 			providerNames: input.providerNames,
+			externalCliAvailability: input.externalCliAvailability,
 			restrictedSources: input.restrictedSources,
 		})),
 	};
@@ -936,7 +964,10 @@ export function handleList(params: ManagementParams, ctx: ManagementContext): Ag
 	const providerStatus = registeredExternalJobProviderStatus();
 	const providerNameSet = providerNames(providerStatus);
 	const capabilityMode = params.capabilities === true;
-	const formatLine = capabilityMode ? formatAgentCapabilitiesLine : formatAgentListLine;
+	const externalCliAvailability = capabilityMode ? externalCliAvailabilityForAgents([...agents, ...restrictedAgents]) : undefined;
+	const formatLine = capabilityMode
+		? (agent: AgentConfig, names: Set<string> | undefined) => formatAgentCapabilitiesLine(agent, names, externalCliAvailability)
+		: formatAgentListLine;
 	const lines = [
 		capabilityMode ? "Executable agents (capabilities):" : "Executable agents:",
 		...formatAgentListSections(agents, providerNameSet, formatLine),
@@ -950,6 +981,7 @@ export function handleList(params: ManagementParams, ctx: ManagementContext): Ag
 		agents,
 		restrictedAgents,
 		providerNames: providerNameSet,
+		externalCliAvailability: externalCliAvailability ?? new Map(),
 		restrictedSources,
 	}));
 }

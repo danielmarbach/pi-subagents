@@ -36,7 +36,7 @@ describe("registered subagent tool description", () => {
 		const description = buildSubagentToolDescription();
 		const metadata = buildSubagentToolPromptMetadata();
 		assert.equal(description, DEFAULT_SUBAGENT_TOOL_DESCRIPTION);
-		assert.equal(Buffer.byteLength(description), 3000);
+		assert.equal(Buffer.byteLength(description), 3301);
 		assert.match(description, /workflowScriptPath.*request cwd/i);
 		assert.match(description, /script inputs are mutually exclusive/i);
 		assert.match(description, /runs\.lanes\(\[\{key,stages:/);
@@ -47,9 +47,9 @@ describe("registered subagent tool description", () => {
 		assert.equal(metadata.promptSnippet, SUBAGENT_TOOL_PROMPT_SNIPPET);
 		assert.equal(Buffer.byteLength(metadata.promptSnippet!), 62);
 		assert.equal(metadata.promptGuidelines!.length, 5);
-		assert.equal(Buffer.byteLength(metadata.promptGuidelines!.join("\n")), 1030);
+		assert.equal(Buffer.byteLength(metadata.promptGuidelines!.join("\n")), 1243);
 		assert.deepEqual(metadata.promptGuidelines, [
-			'Use subagent only when delegation is needed. Before execution, call { action: "list" } and run only executable, non-disabled agents.',
+			'Use subagent only when delegation is needed. Before execution, call { action: "list", capabilities: true } and run only executable, non-disabled agents; for external-cli rows, also require runner.available === true. This is a passive PATH/PATHEXT/X_OK lookup, not authentication, version, or launch proof; launch preflight remains authoritative.',
 			'Omit action for execution; use { agent, task? } for one child. For multi-step or parallel work, make exactly one top-level { workflowScript, async: true } call and launch children only inside it. Use action only for management/control.',
 			"workflowScript rejects nested async function, arrow, and method helpers; use top-level await, plain helper functions, or explicit Promise chains.",
 			"Inside workflowScript, use runs.run/runs.all and await their results. runs.all returns an ordered array, not a key map; stored runs.run promises must later be observed with direct await, Promise.race, or Promise.all.",
@@ -62,7 +62,7 @@ describe("registered subagent tool description", () => {
 		assert.match(promptGuidelines, /stored runs\.run promises must later be observed with direct await, Promise\.race, or Promise\.all/i);
 		assert.match(promptGuidelines, /outputReference.*outputPathMapping.*artifactPaths/i);
 		assert.match(promptGuidelines, /advanced workflows.*action: \"guide\", topic: \"workflows\"/i);
-		assert.doesNotMatch(promptGuidelines, /capabilities: true|runs\.lanes|runs\.host|workflow key identifies one result lane|action: \"models\"|External CLI agents|ordinary child subagents/i);
+		assert.doesNotMatch(promptGuidelines, /runs\.lanes|runs\.host|workflow key identifies one result lane|action: \"models\"|External CLI agents|ordinary child subagents/i);
 		assert.match(description, /External CLI agents.*model override.*native Pi tools/i);
 		assert.doesNotMatch(promptGuidelines, /ordinary children are not orchestrators/i);
 	});

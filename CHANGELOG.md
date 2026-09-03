@@ -7,6 +7,7 @@
 
 ### Fixed
 - Accept calendar/platform `claude --version` output during Claude Code adapter preflight while retaining required launch-flag validation. Thanks [@drouhard](https://github.com/drouhard).
+- Show passive local command availability for external CLI agents in capability listings without replacing launch preflight (#1829). Thanks [@drouhard](https://github.com/drouhard).
 
 ## [0.64.0] - 2026-09-02
 

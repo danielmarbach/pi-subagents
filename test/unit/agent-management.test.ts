@@ -109,6 +109,64 @@ describe("agent management config parsing", () => {
 		assert.equal(JSON.stringify(capabilities).includes("SYSTEM_PROMPT_SENTINEL"), false);
 	});
 
+	it("reports passive external CLI availability for present and absent commands", () => {
+		const agentsDir = path.join(tempDir, ".pi", "agents");
+		fs.mkdirSync(agentsDir, { recursive: true });
+		const presentCommand = path.basename(process.execPath, path.extname(process.execPath));
+		fs.writeFileSync(path.join(agentsDir, "present-external.md"), `---
+name: present-external
+description: Present external CLI
+runner:
+  type: external-cli
+  command: ${presentCommand}
+---
+Present.
+`);
+		fs.writeFileSync(path.join(agentsDir, "missing-external.md"), `---
+name: missing-external
+description: Missing external CLI
+runner:
+  type: external-cli
+  command: missing-external-cli
+---
+Missing.
+`);
+		const previousPath = process.env.PATH;
+		try {
+			process.env.PATH = path.dirname(process.execPath);
+			const listed = handleManagementAction("list", { agentScope: "project", capabilities: true }, {
+				cwd: tempDir,
+				modelRegistry: { getAvailable: () => [] },
+			});
+			assert.equal(listed.isError, false);
+			const text = readText(listed);
+			assert.match(text, new RegExp(`external-cli:${presentCommand} ✓`));
+			assert.match(text, /external-cli:missing-external-cli missing/);
+
+			const rows = listed.details?.agentCapabilities?.agents;
+			assert.ok(rows);
+			const present = rows.find((agent) => agent.name === "present-external");
+			const missing = rows.find((agent) => agent.name === "missing-external");
+			assert.ok(present);
+			assert.ok(missing);
+			assert.equal(present.executable, true);
+			assert.equal(missing.executable, true);
+			assert.equal(present.runner.type, "external-cli");
+			assert.equal(missing.runner.type, "external-cli");
+			if (present.runner.type !== "external-cli" || missing.runner.type !== "external-cli") return;
+			assert.equal(present.runner.command, presentCommand);
+			assert.equal(present.runner.available, true);
+			assert.equal("unavailableReason" in present.runner, false);
+			assert.equal(missing.runner.command, "missing-external-cli");
+			assert.equal(missing.runner.available, false);
+			assert.match(missing.runner.unavailableReason ?? "", /External CLI binary 'missing-external-cli' was not found on PATH\./);
+			assert.ok((missing.runner.unavailableReason ?? "").length <= 256);
+		} finally {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+		}
+	});
+
 	it("rejects management attempts to widen the reserved read-only Claude profile", () => {
 		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
 		const writerRunner = { type: "external-cli", adapter: "claude-code-writer", command: "claude" };
