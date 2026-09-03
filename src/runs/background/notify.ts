@@ -16,6 +16,7 @@ import {
 } from "./completion-batcher.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT, type ChildWatchdogProgress, type ChildWatchdogWarningSummary, type ParallelHandoffReference, type ScheduleOrigin, type SubagentState } from "../../shared/types.ts";
 import { safeTerminalText } from "../../shared/display-text.ts";
+import { appendSessionJournalEntry, type SessionJournalWriter } from "../../shared/session-journal.ts";
 import { resolveSubagentResultStatus } from "../../intercom/result-intercom.ts";
 import { isUnexplainedProcessSignal } from "../shared/process-signal.ts";
 import type { ResultDeliveryOwnership } from "./result-delivery-ownership.ts";
@@ -125,6 +126,8 @@ export interface CompletionNotifier {
 	deliver(result: CompletionNotification): Promise<boolean>;
 	dispose(): void;
 }
+
+export const SUBAGENT_NOTIFY_MESSAGE_TYPE = "subagent-notify";
 
 const CHILD_OUTPUT_PREVIEW_MAX_BYTES = 4 * 1024;
 const CHILD_OUTPUT_PREVIEW_COUNT = 8;
@@ -261,6 +264,9 @@ function formatWatchdogBlockerLines(details: SubagentNotifyDetails): string[] {
 	return [WATCHDOG_BLOCKERS_HEADING, ...details.watchdogBlockers.map((blocker) => `- ${blocker.agent}: ${blocker.summary} (${blocker.stalemate ? "stalemate" : blocker.addressed ? "addressed" : "unaddressed"})`)];
 }
 
+// Legacy-session fallback: new messages carry structured details and no longer
+// need markdown parsing. Keep this for historical custom_message entries that
+// predate journal-backed details.
 // A stalemate blocker parses back as unaddressed; acceptance treats both as unresolved.
 function parseWatchdogBlockerLines(lines: string[]): SubagentNotifyWatchdogBlocker[] {
 	const blockers: SubagentNotifyWatchdogBlocker[] = [];
@@ -298,6 +304,7 @@ export function formatSingleCompletion(details: SubagentNotifyDetails): string {
 		.join("\n");
 }
 
+/** Parse a legacy notification that was persisted without structured details. */
 export function parseSubagentNotifyContent(content: string): SubagentNotifyDetails | undefined {
 	const lines = content.split("\n");
 	const match = (lines[0] ?? "").match(/^(Background task|Detached foreground task) (completed|failed|paused|stopped): \*\*(.+?)\*\*(?:\s+(\([^)]*\)))?$/);
@@ -395,24 +402,33 @@ interface PendingCompletion {
 	resolve(accepted: boolean): void;
 }
 
-function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, items: PendingCompletion[]): boolean {
+function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage"> & SessionJournalWriter, items: PendingCompletion[]): boolean {
 	if (items.length === 0) return true;
 	const details = items.map((item) => item.details);
 	const content = details.length === 1 ? formatSingleCompletion(details[0]!) : formatGroupedCompletion(details);
 	const display = details.some((detail) => detail.source === "foreground" || detail.status !== "completed" || detail.scheduleOrigin !== undefined);
+	const journalDetails = details.length === 1 ? details[0]! : details;
+	const message: {
+		customType: typeof SUBAGENT_NOTIFY_MESSAGE_TYPE;
+		content: string;
+		display: boolean;
+		details?: SubagentNotifyDetails | SubagentNotifyDetails[];
+	} = {
+		customType: SUBAGENT_NOTIFY_MESSAGE_TYPE,
+		content,
+		display,
+	};
+	if (typeof pi.appendEntry === "function") message.details = journalDetails;
 	try {
 		pi.sendMessage(
-			{
-				customType: "subagent-notify",
-				content,
-				display,
-			},
+			message,
 			{ triggerTurn: items.some((item) => item.triggerTurn) },
 		);
-		return true;
 	} catch {
 		return false;
 	}
+	appendSessionJournalEntry(pi, SUBAGENT_NOTIFY_MESSAGE_TYPE, journalDetails);
+	return true;
 }
 
 function completionBatchKey(result: CompletionNotification): string {

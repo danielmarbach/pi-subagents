@@ -3,7 +3,7 @@ import { captureWatchdogDiffBaseline, type WatchdogDiffBaseline } from "./diff-t
 import { MainWatchdogRuntime } from "./runtime.ts";
 import { createMainWatchdogReview } from "./review.ts";
 import { DEFAULT_WATCHDOG_CONFIG } from "./settings.ts";
-import { createWatchdogWarningMessage } from "./warning-format.ts";
+import { sendWatchdogWarning } from "./warning-format.ts";
 import {
 	CHILD_WATCHDOG_STATUS_EVENT,
 	decodeChildWatchdogConfig,
@@ -77,7 +77,7 @@ export function registerChildWatchdog(pi: ExtensionAPI, configOrRaw: ChildWatchd
 		reviewChangesOnly: true,
 		displayWarning: (details, options) => {
 			const childDetails = childWarningDetails(details, childConfig);
-			pi.sendMessage(createWatchdogWarningMessage(childDetails, { display: true, details: childDetails }), options);
+			sendWatchdogWarning(pi, childDetails, { display: true, details: childDetails }, options);
 		},
 	});
 	const rememberContext = (ctx: ExtensionContext) => {

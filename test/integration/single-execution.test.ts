@@ -1999,7 +1999,6 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		const sent: Array<{ options?: { triggerTurn?: boolean } }> = [];
 		handleSubagentControlNotice({
 			pi: { sendMessage(_message, options) { sent.push({ options: options as { triggerTurn?: boolean } }); } },
-			state: { asyncJobs } as SubagentState,
 			visibleControlNotices: new Set(),
 			details: { event: attentionPayload.event!, source: "async" },
 		});

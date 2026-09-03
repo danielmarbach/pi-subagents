@@ -6,7 +6,8 @@ import { describe, it } from "node:test";
 import { visibleWidth, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { EXTERNAL_RUN_REGISTRY_KEY, EXTERNAL_RUN_REGISTRY_VERSION, registerExternalRun } from "../../src/api/external-runs.ts";
 import { collectFleetSnapshot, openSubagentFleet, SubagentFleetComponent } from "../../src/tui/fleet.ts";
-import { persistForegroundRunHistory, restoreForegroundRunHistory } from "../../src/runs/foreground/foreground-history.ts";
+import { FOREGROUND_RUN_HISTORY_ENTRY_TYPE, persistForegroundRunHistory, restoreForegroundRunHistory } from "../../src/runs/foreground/foreground-history.ts";
+import type { SessionJournalEntry } from "../../src/shared/session-journal.ts";
 import { FLEET_STATUS_WIDGET_KEY } from "../../src/tui/fleet-status.ts";
 import { registerLivePromptAudit, rewritePromptWithGuidance } from "../../src/runs/foreground/prompt-audit.ts";
 import { getArtifactPaths, getArtifactsDir, getProjectArtifactsDir } from "../../src/shared/artifacts.ts";
@@ -882,6 +883,62 @@ describe("native subagent fleet", () => {
 			persistForegroundRunHistory(state, { resultsDir });
 			const persisted = JSON.parse(fs.readFileSync(path.join(resultsDir, "foreground-history.json"), "utf-8")) as { runs: Array<{ runId: string }> };
 			assert.deepEqual(persisted.runs.map((run) => run.runId), ["terminal"]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("restores foreground history from the selected session branch", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-foreground-journal-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const entries: SessionJournalEntry[] = [];
+			const appendEntry = (customType: string, data: unknown) => entries.push({ type: "custom", customType, data });
+			const journal = { appendEntry };
+			const state = stateForTest();
+			state.foregroundRuns!.set("branch-a-run", {
+				runId: "branch-a-run",
+				mode: "single",
+				cwd: root,
+				sessionId: "session-current",
+				updatedAt: 100,
+				children: [{ agent: "alpha", index: 0, status: "completed", finalOutput: "alpha done" }],
+			});
+			persistForegroundRunHistory(state, { resultsDir, journal, journalRun: state.foregroundRuns.get("branch-a-run") });
+			const branchA = [...entries];
+
+			state.foregroundRuns!.clear();
+			state.foregroundRuns!.set("branch-b-run", {
+				runId: "branch-b-run",
+				mode: "single",
+				cwd: root,
+				sessionId: "session-current",
+				updatedAt: 200,
+				children: [{ agent: "beta", index: 0, status: "failed", error: "beta failed" }],
+			});
+			persistForegroundRunHistory(state, { resultsDir, journal, journalRun: state.foregroundRuns.get("branch-b-run") });
+			const branchB = entries.slice(branchA.length);
+			assert.equal((branchA[0] as { customType?: string }).customType, FOREGROUND_RUN_HISTORY_ENTRY_TYPE);
+
+			const selected = stateForTest();
+			assert.equal(restoreForegroundRunHistory(selected, { branchEntries: branchA }), 1);
+			assert.deepEqual([...selected.foregroundRuns!.keys()], ["branch-a-run"]);
+			assert.equal(restoreForegroundRunHistory(selected, { branchEntries: branchB }), 1);
+			assert.deepEqual([...selected.foregroundRuns!.keys()], ["branch-b-run"]);
+
+			fs.writeFileSync(path.join(resultsDir, "foreground-history.json"), JSON.stringify({
+				version: 1,
+				runs: [{
+					runId: "legacy-run",
+					mode: "single",
+					cwd: root,
+					sessionId: "session-current",
+					updatedAt: 300,
+					children: [{ agent: "legacy", index: 0, status: "completed", finalOutput: "legacy" }],
+				}],
+			}, null, 2), "utf-8");
+			assert.equal(restoreForegroundRunHistory(selected, { branchEntries: [], resultsDir }), 1);
+			assert.deepEqual([...selected.foregroundRuns!.keys()], ["legacy-run"]);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

@@ -54,7 +54,7 @@ import { resolveWaitToolConfig } from "../runs/background/subagent-wait.ts";
 import { registerWaitTool } from "../runs/background/wait-tool.ts";
 import { createWaitSubscriptionManager } from "../runs/background/wait-subscriptions.ts";
 import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
-import registerSubagentNotify, { parseSubagentNotifyContent, type SubagentNotifyDetails } from "../runs/background/notify.ts";
+import registerSubagentNotify, { parseSubagentNotifyContent, SUBAGENT_NOTIFY_MESSAGE_TYPE, type SubagentNotifyDetails } from "../runs/background/notify.ts";
 import { formatSteeringNotice, handleSubagentSteeringNotice, SUBAGENT_STEERING_MESSAGE_TYPE, type SubagentSteeringMessageDetails } from "./steering-notices.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_PARENT_SESSION_ENV } from "../runs/shared/pi-args.ts";
 import { resolveCurrentSubagentCapabilityCeiling } from "../runs/shared/capability-ceiling.ts";
@@ -65,6 +65,7 @@ import { formatWorkflowPreflightSummary, normalizeWorkflowPreflight } from "../w
 import { finalizeToolResult } from "./tool-result.ts";
 import { collectGoalContinuationNotices } from "../missions/goal-driver.ts";
 import { restoreForegroundRunHistory } from "../runs/foreground/foreground-history.ts";
+import type { SessionJournalEntry } from "../shared/session-journal.ts";
 import { resolveMissionStoreLocation } from "../missions/store.ts";
 import { listRetainedChildren } from "../runs/background/retained-children.ts";
 import {
@@ -86,6 +87,7 @@ import {
 import {
 	formatSubagentControlNotice,
 	handleSubagentControlNotice,
+	restoreVisibleControlNotices,
 	SUBAGENT_CONTROL_MESSAGE_TYPE,
 	type SubagentControlMessageDetails,
 } from "./control-notices.ts";
@@ -98,12 +100,10 @@ const RUNTIME_REGISTRY_STORE_KEY = "__piSubagentRuntimeRegistry";
 interface SubagentRuntimeEntry {
 	cleanup(): void;
 	sessionManager: object | null;
-	visibleControlNotices: Set<string>;
 }
 
 interface SubagentRuntimeRegistry {
 	bySessionManager: WeakMap<object, SubagentRuntimeEntry>;
-	visibleControlNoticesBySessionManager: WeakMap<object, Set<string>>;
 	activeEntries: Set<SubagentRuntimeEntry>;
 }
 
@@ -111,14 +111,10 @@ function getRuntimeRegistry(): SubagentRuntimeRegistry {
 	const globalStore = globalThis as Record<string, unknown>;
 	const existing = globalStore[RUNTIME_REGISTRY_STORE_KEY] as Partial<SubagentRuntimeRegistry> | undefined;
 	if (existing?.bySessionManager instanceof WeakMap && existing.activeEntries instanceof Set) {
-		if (!(existing.visibleControlNoticesBySessionManager instanceof WeakMap)) {
-			existing.visibleControlNoticesBySessionManager = new WeakMap();
-		}
 		return existing as SubagentRuntimeRegistry;
 	}
 	const registry: SubagentRuntimeRegistry = {
 		bySessionManager: new WeakMap(),
-		visibleControlNoticesBySessionManager: new WeakMap(),
 		activeEntries: new Set(),
 	};
 	globalStore[RUNTIME_REGISTRY_STORE_KEY] = registry;
@@ -618,9 +614,13 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		return new Text(content, 0, 0);
 	});
 
-	pi.registerMessageRenderer<SubagentNotifyDetails>("subagent-notify", (message, options, theme) => {
+	pi.registerMessageRenderer<SubagentNotifyDetails | SubagentNotifyDetails[]>(SUBAGENT_NOTIFY_MESSAGE_TYPE, (message, options, theme) => {
 		const content = typeof message.content === "string" ? message.content : "";
-		const details = (message.details as SubagentNotifyDetails | undefined) ?? parseSubagentNotifyContent(content);
+		const journalDetails = message.details as SubagentNotifyDetails | SubagentNotifyDetails[] | undefined;
+		// Grouped completions already have a complete display projection. Their
+		// journal payload is an array and intentionally bypasses single-item styling.
+		if (Array.isArray(journalDetails)) return new Text(content, 0, 0);
+		const details = journalDetails ?? parseSubagentNotifyContent(content);
 		if (!details) return new Text(content, 0, 0);
 		const icon = details.status === "completed"
 			? theme.fg("success", "✓")
@@ -769,7 +769,6 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			for (const notice of collectGoalContinuationNotices({ location, ownerSessionId, retainedChildren, turnId: goalTurnId })) {
 				handleSubagentControlNotice({
 					pi,
-					state,
 					visibleControlNotices: new Set(),
 					details: { source: "goal", event: notice.event, noticeText: notice.message },
 				});
@@ -785,6 +784,24 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	});
 
 	let visibleControlNotices = new Set<string>();
+	const rebuildSessionJournalState = (ctx: ExtensionContext): void => {
+		let branchEntries: readonly SessionJournalEntry[] | undefined;
+		if (typeof ctx.sessionManager.getBranch === "function") {
+			try {
+				const entries = ctx.sessionManager.getBranch();
+				if (Array.isArray(entries)) branchEntries = entries;
+			} catch (error) {
+				console.error("Failed to read the selected session branch:", error);
+			}
+		}
+		visibleControlNotices = new Set();
+		restoreVisibleControlNotices(branchEntries, visibleControlNotices);
+		restoreForegroundRunHistory(state, {
+			sessionId: state.currentSessionId,
+			branchEntries,
+			resultsDir: DIRS.results,
+		});
+	};
 	const activeHerdrRuns = () => projectActiveHerdrRuns(state);
 	const herdrStatusBridge = registerHerdrStatusBridge({
 		events: pi.events,
@@ -797,7 +814,6 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const controlEventHandler = (payload: unknown) => {
 		handleSubagentControlNotice({
 			pi,
-			state,
 			visibleControlNotices,
 			details: payload as SubagentControlMessageDetails,
 		});
@@ -931,8 +947,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		resetJobs(ctx);
 		logSlowPhase("reset-jobs", phaseStartedAt);
 		phaseStartedAt = Date.now();
-		restoreForegroundRunHistory(state, { resultsDir: DIRS.results });
-		logSlowPhase("foreground-history", phaseStartedAt);
+		rebuildSessionJournalState(ctx);
+		logSlowPhase("session-journal-state", phaseStartedAt);
 		phaseStartedAt = Date.now();
 		restoreActiveJobs(ctx);
 		logSlowPhase("active-job-restore", phaseStartedAt);
@@ -957,7 +973,6 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	let runtimeCleaned = false;
 	const runtimeEntry: SubagentRuntimeEntry = {
 		sessionManager: null,
-		visibleControlNotices,
 		cleanup() {
 			if (runtimeCleaned) return;
 			runtimeCleaned = true;
@@ -1025,13 +1040,6 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		}
 		const sessionManager = ctx.sessionManager as object;
 		const previousRuntime = runtimeRegistry.bySessionManager.get(sessionManager);
-		const existingVisibleControlNotices = runtimeRegistry.visibleControlNoticesBySessionManager.get(sessionManager);
-		if (existingVisibleControlNotices) {
-			visibleControlNotices = existingVisibleControlNotices;
-		} else {
-			runtimeRegistry.visibleControlNoticesBySessionManager.set(sessionManager, visibleControlNotices);
-		}
-		runtimeEntry.visibleControlNotices = visibleControlNotices;
 		if (runtimeEntry.sessionManager && runtimeEntry.sessionManager !== sessionManager
 			&& runtimeRegistry.bySessionManager.get(runtimeEntry.sessionManager) === runtimeEntry) {
 			runtimeRegistry.bySessionManager.delete(runtimeEntry.sessionManager);
@@ -1085,6 +1093,16 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		rpcBridge.emitReady(ctx);
 		supervisorChannel.start();
 		supervisorChannel.activateTransport();
+	});
+
+	pi.on("session_tree", (_event, ctx) => {
+		state.currentSessionId = resolveCurrentSessionId(ctx.sessionManager);
+		state.lastUiContext = ctx;
+		// Journal entries win; the bounded index remains only for old sessions
+		// whose selected branch predates foreground-history entries.
+		rebuildSessionJournalState(ctx);
+		fleetStatus?.setContext(ctx);
+		fleetStatus?.refresh();
 	});
 
 	pi.on("session_shutdown", async () => {

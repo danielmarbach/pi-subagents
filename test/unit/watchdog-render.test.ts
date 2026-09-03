@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { formatWatchdogWarningRenderText } from "../../src/watchdog/render.ts";
-import { createWatchdogWarningMessage, formatWatchdogWarningContent } from "../../src/watchdog/warning-format.ts";
+import { createWatchdogWarningMessage, formatWatchdogWarningContent, sendWatchdogWarning } from "../../src/watchdog/warning-format.ts";
 import { SUBAGENT_WATCHDOG_WARNING_TYPE, type WatchdogWarningDetails } from "../../src/watchdog/types.ts";
 
 describe("watchdog warning formatting and rendering", () => {
@@ -45,6 +45,31 @@ describe("watchdog warning formatting and rendering", () => {
 		assert.equal(message.details.source, "main");
 		assert.match(message.content, /<summary>Missing focused test<\/summary>/);
 		assert.match(message.content, /<recommended_action>Add a parser regression test\.<\/recommended_action>/);
+	});
+
+	it("appends structured warning details to the session journal", () => {
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		sendWatchdogWarning({
+			sendMessage() {},
+			appendEntry(customType: string, data: unknown) {
+				entries.push({ customType, data });
+			},
+		}, {
+			severity: "blocker",
+			summary: "Missing focused test",
+			evidence: "No test was run.",
+			recommendedAction: "Run the focused test.",
+		});
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0]?.customType, SUBAGENT_WATCHDOG_WARNING_TYPE);
+		assert.deepEqual(entries[0]?.data, {
+			severity: "blocker",
+			summary: "Missing focused test",
+			evidence: "No test was run.",
+			recommendedAction: "Run the focused test.",
+			category: "other",
+			source: "main",
+		});
 	});
 
 	it("renders concern, blocker, stale, failed, and stalemate states in text", () => {

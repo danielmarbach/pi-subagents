@@ -6,6 +6,7 @@ import registerSubagentNotify, {
 	formatGroupedCompletion,
 	formatSingleCompletion,
 	parseSubagentNotifyContent,
+	SUBAGENT_NOTIFY_MESSAGE_TYPE,
 	type RegisterSubagentNotifyOptions,
 	type SubagentNotifyDetails,
 } from "../../src/runs/background/notify.ts";
@@ -151,6 +152,27 @@ describe("registerSubagentNotify", () => {
 		const { notifier, sent } = createPi("session-a");
 		assert.equal(await notifier.deliver(completionResult({ id: "direct-accepted" })), true);
 		assert.equal(sent.length, 1);
+	});
+
+	it("appends typed completion details alongside the display message", async () => {
+		const events = createEventBus();
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		const pi = {
+			events,
+			sendMessage() {},
+			appendEntry(customType: string, data: unknown) {
+				entries.push({ customType, data });
+			},
+		};
+		const notifier = registerSubagentNotify(pi as never, { currentSessionId: "session-a", completionOwnerId: COMPLETION_OWNER_ID }, { batchConfig: { enabled: false } });
+		try {
+			assert.equal(await notifier.deliver(completionResult({ id: "journal-entry" })), true);
+			assert.equal(entries.length, 1);
+			assert.equal(entries[0]?.customType, SUBAGENT_NOTIFY_MESSAGE_TYPE);
+			assert.deepEqual(entries[0]?.data, { agent: "worker", status: "completed", resultPreview: "Done" });
+		} finally {
+			notifier.dispose();
+		}
 	});
 
 	it("rejects async completion delivery for a missing or different parent owner", async () => {

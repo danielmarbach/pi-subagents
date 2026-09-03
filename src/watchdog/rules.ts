@@ -1,8 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { splitKnownThinkingSuffix } from "../shared/model-info.ts";
+import type { SessionJournalWriter } from "../shared/session-journal.ts";
 import { resolveWatchdogConfig } from "./settings.ts";
 import type { WatchdogRulesConfig, WatchdogWarning } from "./types.ts";
-import { createWatchdogWarningMessage } from "./warning-format.ts";
+import { sendWatchdogWarning } from "./warning-format.ts";
 
 export interface WatchdogRuleViolation {
 	agent: string;
@@ -64,7 +65,7 @@ export function applyWatchdogLaunchRules(input: { cwd: string; agent: string; mo
 }
 
 /** For launch paths without a main watchdog runtime (background chain steps). */
-export function sendRuleViolationWarning(pi: Pick<ExtensionAPI, "sendMessage">, violation: WatchdogRuleViolation): void {
+export function sendRuleViolationWarning(pi: Pick<ExtensionAPI, "sendMessage"> & SessionJournalWriter, violation: WatchdogRuleViolation): void {
 	const warning = ruleViolationWarning(violation);
-	pi.sendMessage(createWatchdogWarningMessage(warning, { display: true, details: { state: "displayed", displayedAt: new Date().toISOString() } }), { deliverAs: "steer" });
+	sendWatchdogWarning(pi, warning, { display: true, details: { state: "displayed", displayedAt: new Date().toISOString() } }, { deliverAs: "steer" });
 }

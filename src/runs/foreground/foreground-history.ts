@@ -3,10 +3,12 @@ import * as path from "node:path";
 import type { ForegroundResumeChild, ForegroundResumeRun, SubagentState } from "../../shared/types.ts";
 import { DIRS } from "../../shared/types.ts";
 import { writePrivateAtomicJson } from "../../shared/atomic-json.ts";
+import { appendSessionJournalEntry, readCustomJournalEntries, type SessionJournalEntry, type SessionJournalWriter } from "../../shared/session-journal.ts";
 import { utf8Tail } from "../../shared/utf8.ts";
 import { validateAcceptanceInput } from "../shared/acceptance.ts";
 
 export const MAX_REMEMBERED_FOREGROUND_RUNS = 50;
+export const FOREGROUND_RUN_HISTORY_ENTRY_TYPE = "subagent_foreground_run_history";
 const HISTORY_VERSION = 1;
 const MAX_INLINE_OUTPUT_BYTES = 64 * 1024;
 const MAX_RESUME_CONTRACT_BYTES = 64 * 1024;
@@ -131,7 +133,7 @@ function sortAndBound(runs: ForegroundResumeRun[], limit: number): ForegroundRes
 	return [...runs].sort((left, right) => right.updatedAt - left.updatedAt).slice(0, limit);
 }
 
-export function persistForegroundRunHistory(state: SubagentState, options: { resultsDir?: string; limit?: number } = {}): void {
+export function persistForegroundRunHistory(state: SubagentState, options: { resultsDir?: string; limit?: number; journal?: SessionJournalWriter; journalRun?: ForegroundResumeRun } = {}): void {
 	const resultsDir = options.resultsDir ?? DIRS.results;
 	const limit = options.limit ?? MAX_REMEMBERED_FOREGROUND_RUNS;
 	const existing = readIndex(resultsDir);
@@ -141,15 +143,22 @@ export function persistForegroundRunHistory(state: SubagentState, options: { res
 		if (compact) merged.set(compact.runId, compact);
 	}
 	const runs = sortAndBound([...merged.values()], limit);
+	const journalRun = options.journalRun ? compactRun(options.journalRun) : undefined;
+	if (journalRun && options.journal) appendSessionJournalEntry(options.journal, FOREGROUND_RUN_HISTORY_ENTRY_TYPE, journalRun);
 	writePrivateAtomicJson(historyPath(resultsDir), { version: HISTORY_VERSION, runs });
 }
 
-export function restoreForegroundRunHistory(state: SubagentState, options: { resultsDir?: string; sessionId?: string | null; limit?: number } = {}): number {
+export function restoreForegroundRunHistory(state: SubagentState, options: { resultsDir?: string; sessionId?: string | null; limit?: number; branchEntries?: readonly SessionJournalEntry[] } = {}): number {
 	const sessionId = options.sessionId ?? state.currentSessionId;
+	state.foregroundRuns = new Map();
 	if (!sessionId) return 0;
-	const index = readIndex(options.resultsDir ?? DIRS.results);
-	const runs = sortAndBound(index.runs.filter((run) => run.sessionId === sessionId), options.limit ?? MAX_REMEMBERED_FOREGROUND_RUNS);
-	state.foregroundRuns ??= new Map();
+	const journal = readCustomJournalEntries(options.branchEntries, FOREGROUND_RUN_HISTORY_ENTRY_TYPE);
+	const journalRunsById = new Map<string, ForegroundResumeRun>();
+	for (const run of journal.data) {
+		if (isRestorableRun(run)) journalRunsById.set(run.runId, run);
+	}
+	const sourceRuns = journal.present ? [...journalRunsById.values()] : readIndex(options.resultsDir ?? DIRS.results).runs;
+	const runs = sortAndBound(sourceRuns.filter((run) => run.sessionId === sessionId), options.limit ?? MAX_REMEMBERED_FOREGROUND_RUNS);
 	let restored = 0;
 	for (const run of runs) {
 		if (state.foregroundRuns.has(run.runId)) continue;

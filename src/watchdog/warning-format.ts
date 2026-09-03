@@ -1,9 +1,11 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	SUBAGENT_WATCHDOG_WARNING_TYPE,
 	type WatchdogWarning,
 	type WatchdogWarningDetails,
 	type WatchdogWarningMessage,
 } from "./types.ts";
+import { appendSessionJournalEntry, type SessionJournalWriter } from "../shared/session-journal.ts";
 
 function escapeXmlText(value: string): string {
 	return value
@@ -69,4 +71,17 @@ export function createWatchdogWarningMessage(
 		display: options.display ?? true,
 		details,
 	};
+}
+
+type WatchdogWarningPi = Pick<ExtensionAPI, "sendMessage"> & SessionJournalWriter;
+
+export function sendWatchdogWarning(
+	pi: WatchdogWarningPi,
+	warning: WatchdogWarning,
+	options: { display?: boolean; details?: Partial<WatchdogWarningDetails> } = {},
+	deliveryOptions?: Parameters<ExtensionAPI["sendMessage"]>[1],
+): void {
+	const message = createWatchdogWarningMessage(warning, options);
+	pi.sendMessage(message, deliveryOptions);
+	appendSessionJournalEntry(pi, SUBAGENT_WATCHDOG_WARNING_TYPE, message.details);
 }

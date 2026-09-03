@@ -18,6 +18,7 @@ import {
 } from "./foreground-control.ts";
 import { getLivePromptAudit, rewritePromptWithGuidance, updateLiveEffectivePrompt } from "./prompt-audit.ts";
 import { persistForegroundRunHistory, MAX_REMEMBERED_FOREGROUND_RUNS } from "./foreground-history.ts";
+import type { SessionJournalWriter } from "../../shared/session-journal.ts";
 import { resolveExecutionAgentScope } from "../../agents/agent-scope.ts";
 import { handleManagementAction } from "../../agents/agent-management.ts";
 import { handleRefinementAction } from "../../agents/agent-refinements.ts";
@@ -684,9 +685,14 @@ function trimRememberedForegroundRuns(state: SubagentState): void {
 	}
 }
 
-function persistRememberedForegroundRuns(state: SubagentState): void {
+function persistRememberedForegroundRuns(state: SubagentState, options: { runId?: string; appendEntry?: SessionJournalWriter["appendEntry"] } = {}): void {
 	try {
-		persistForegroundRunHistory(state);
+		const journalRun = options.runId ? state.foregroundRuns?.get(options.runId) : undefined;
+		if (!options.appendEntry || !journalRun || journalRun.sessionId !== state.currentSessionId) {
+			persistForegroundRunHistory(state);
+			return;
+		}
+		persistForegroundRunHistory(state, { journal: { appendEntry: options.appendEntry }, journalRun });
 	} catch (error) {
 		console.error("Failed to persist foreground run history:", error);
 	}
@@ -707,7 +713,7 @@ function foregroundChildActivityFromProgress(progress: SingleResult["progress"] 
 	};
 }
 
-function rememberForegroundRun(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; sessionId: string | null; results: SingleResult[]; params: SubagentParamsLike; effectiveOutput?: string | boolean; effectiveOutputMode: OutputMode; extensionBindings?: ExtensionBindings }): void {
+function rememberForegroundRun(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; sessionId: string | null; results: SingleResult[]; params: SubagentParamsLike; effectiveOutput?: string | boolean; effectiveOutputMode: OutputMode; extensionBindings?: ExtensionBindings; appendEntry?: SessionJournalWriter["appendEntry"] }): void {
 	state.foregroundRuns ??= new Map();
 	const previous = state.foregroundRuns.get(input.runId);
 	const updatedAt = Date.now();
@@ -769,7 +775,7 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 		}),
 	});
 	trimRememberedForegroundRuns(state);
-	persistRememberedForegroundRuns(state);
+	persistRememberedForegroundRuns(state, { runId: input.runId, appendEntry: input.appendEntry });
 }
 
 function applyControlEventToRememberedForegroundRun(state: SubagentState, event: ControlEvent): void {
@@ -795,7 +801,7 @@ function applyControlEventToRememberedForegroundRun(state: SubagentState, event:
 	};
 }
 
-function updateRememberedForegroundChild(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; sessionId: string | null; index: number; result: SingleResult; events: IntercomEventBus; notify?: boolean }): void {
+function updateRememberedForegroundChild(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; sessionId: string | null; index: number; result: SingleResult; events: IntercomEventBus; notify?: boolean; appendEntry?: SessionJournalWriter["appendEntry"] }): void {
 	state.foregroundRuns ??= new Map();
 	const updatedAt = Date.now();
 	let run = state.foregroundRuns.get(input.runId);
@@ -845,7 +851,7 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		...(input.result.capabilityAudit ? { capabilityAudit: input.result.capabilityAudit } : {}),
 	});
 	trimRememberedForegroundRuns(state);
-	persistRememberedForegroundRuns(state);
+	persistRememberedForegroundRuns(state, { runId: input.runId, appendEntry: input.appendEntry });
 	const output = getSingleResultOutput(input.result).trim();
 	const success = terminalStatus === "completed";
 	const summary = !success && input.result.error
@@ -3844,7 +3850,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 						finalizeSingleWorktreeHandoff({ worktreeSetup, artifactsDir, runId, cwd: sourceCwd, agent: params.agent!, result, workflowKey: params.workflowKey, lane });
 					}
 					try {
-						updateRememberedForegroundChild(deps.state, { runId, mode: "single", cwd: singleCwd, sessionId: data.parentSessionId, index: 0, result, events: deps.pi.events, notify: true });
+						updateRememberedForegroundChild(deps.state, { runId, mode: "single", cwd: singleCwd, sessionId: data.parentSessionId, index: 0, result, events: deps.pi.events, notify: true, appendEntry: (customType, entry) => deps.pi.appendEntry(customType, entry) });
 					} catch {
 						// Remembered foreground state is best-effort; run history and cleanup must still complete.
 					}
@@ -3939,7 +3945,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		usageBudget: usageBudgetState(data.usageBudget, totalCost),
 		...(worktreeHandoff?.reference ? { parallelHandoff: worktreeHandoff.reference } : {}),
 	}));
-	rememberForegroundRun(deps.state, { runId, mode: "single", cwd: singleCwd, sessionId: data.parentSessionId, results: details.results, params, effectiveOutput, effectiveOutputMode, extensionBindings: params.extensionBindings });
+	rememberForegroundRun(deps.state, { runId, mode: "single", cwd: singleCwd, sessionId: data.parentSessionId, results: details.results, params, effectiveOutput, effectiveOutputMode, extensionBindings: params.extensionBindings, appendEntry: (customType, entry) => deps.pi.appendEntry(customType, entry) });
 
 	const suppressRoutineResultIntercom = shouldSuppressRoutineResultIntercom({ suppressRoutineResultIntercom: params.suppressRoutineResultIntercom, results: [r] });
 	if (!r.detached && !r.interrupted && !suppressRoutineResultIntercom) {

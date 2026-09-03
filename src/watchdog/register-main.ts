@@ -14,7 +14,7 @@ import {
 	type WatchdogWarning,
 	type WatchdogWarningDetails,
 } from "./types.ts";
-import { createWatchdogWarningMessage } from "./warning-format.ts";
+import { sendWatchdogWarning } from "./warning-format.ts";
 
 interface RegisterMainWatchdogOptions {
 	runtime?: MainWatchdogRuntime;
@@ -370,7 +370,7 @@ async function handleWatchdogCommand(
 		}
 		const warning = createTestWarning(test.severity, test.text);
 		const details = runtime.recordDisplayedWarning(warning);
-		pi.sendMessage(createWatchdogWarningMessage(details, { display: true, details }));
+		sendWatchdogWarning(pi, details, { display: true, details });
 		return;
 	}
 	ctx.ui.notify(`Usage: /subagents-watchdog [status|on|off|session on|session off|recommend-model|model recommended|model <provider/model[:thinking]>|model inherit|thinking ${THINKING_LEVELS.join("|")}|thinking inherit|session model recommended|check|test concern <text>|test blocker <text>]`, "error");
@@ -386,7 +386,7 @@ export function registerMainWatchdog(pi: ExtensionAPI, options: RegisterMainWatc
 		review: options.review ?? createMainWatchdogReview(() => currentContext, { getThinkingLevel: () => pi.getThinkingLevel(), diffBaseline: () => diffBaseline }),
 		reviewDescription: options.review ? "injected seam" : "real model review",
 		reviewChangesOnly: true,
-		displayWarning: (details, options) => pi.sendMessage(createWatchdogWarningMessage(details, { display: true, details }), options),
+		displayWarning: (details, options) => sendWatchdogWarning(pi, details, { display: true, details }, options),
 	});
 
 	pi.registerMessageRenderer<WatchdogWarningDetails>(SUBAGENT_WATCHDOG_WARNING_TYPE, (message, renderOptions, theme) => {
