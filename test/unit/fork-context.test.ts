@@ -164,10 +164,11 @@ describe("createForkContextResolver", () => {
 		}
 	});
 
-	it("creates forked sessions through the default package opener", () => {
+	it("creates forked sessions through SessionManager.forkFrom", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-default-"));
 		try {
 			const sessionDir = path.join(tempDir, "sessions");
+			const targetCwd = path.join(tempDir, "child-cwd");
 			const parent = SessionManager.create(tempDir, sessionDir);
 			parent.appendMessage({ role: "user", content: "parent prompt" });
 			parent.appendMessage({ role: "assistant", content: "parent response" });
@@ -180,13 +181,16 @@ describe("createForkContextResolver", () => {
 			const resolver = createForkContextResolver({
 				getSessionFile: () => parentSessionFile,
 				getLeafId: () => leafId,
-				getSessionDir: () => sessionDir,
-			}, "fork");
+			}, "fork", { forkCwdForIndex: () => targetCwd });
 
 			const childSessionFile = resolver.sessionFileForIndex(0);
 			assert.ok(childSessionFile);
 			assert.notEqual(childSessionFile, parentSessionFile);
 			assert.equal(fs.existsSync(childSessionFile), true);
+			const childEntries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(childEntries[0].cwd, path.resolve(targetCwd));
+			assert.equal(childEntries[0].parentSession, parentSessionFile);
+			assert.deepEqual(childEntries.slice(1), parent.getEntries());
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -213,7 +217,6 @@ describe("createForkContextResolver", () => {
 			const resolver = createForkContextResolver({
 				getSessionFile: () => parentSessionFile,
 				getLeafId: () => leafId,
-				getSessionDir: () => sessionDir,
 			}, "fork");
 
 			const childSessionFile = resolver.sessionFileForIndex(0);

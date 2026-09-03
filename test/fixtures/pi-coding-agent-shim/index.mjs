@@ -96,6 +96,24 @@ export class SessionManager {
 		return new SessionManager(header.cwd ?? process.cwd(), sessionDir, filePath, header, entries);
 	}
 
+	static forkFrom(sourcePath, targetCwd, sessionDir = path.join(targetCwd, ".pi", "sessions")) {
+		const { header, entries } = readSession(sourcePath);
+		if (!header || header.type !== "session") throw new Error(`Cannot fork: source session has no header: ${sourcePath}`);
+		const id = randomUUID();
+		const timestamp = new Date().toISOString();
+		const childHeader = {
+			type: "session",
+			version: 3,
+			id,
+			timestamp,
+			cwd: path.resolve(targetCwd),
+			parentSession: path.resolve(sourcePath),
+		};
+		const childFile = path.join(sessionDir, `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
+		writeSession(childFile, childHeader, entries);
+		return new SessionManager(path.resolve(targetCwd), sessionDir, childFile, childHeader, entries);
+	}
+
 	appendMessage(message) {
 		const previous = this.entries.at(-1);
 		const id = randomUUID().slice(0, 8);

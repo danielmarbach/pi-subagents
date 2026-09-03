@@ -6423,6 +6423,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				: undefined;
 			const forkContextResolver = createForkContextResolver(ctx.sessionManager, contextPolicy.usesFork ? "fork" : undefined, {
 				forceThinkingOffForIndex: (index) => forkThinkingRequirements.get(index) ?? true,
+				forkCwdForIndex: () => effectiveCwd,
 				...(pruneSession ? { pruneSession } : {}),
 			});
 			prepareForkSessionForIndex = forkContextResolver.prepareSessionForIndex;

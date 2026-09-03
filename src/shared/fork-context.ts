@@ -26,17 +26,19 @@ interface BranchSessionManager {
 	createBranchedSession(leafId: string): string | undefined;
 	getHeader?: () => BranchSessionEntry | null;
 	getEntries?: () => BranchSessionEntry[];
+	getBranch?: (leafId?: string) => BranchSessionEntry[];
 }
 
 interface ForkableSessionManager {
 	getSessionFile(): string | undefined;
 	getLeafId(): string | null;
-	getSessionDir?(): string;
 	openSession?: (path: string, sessionDir?: string) => BranchSessionManager;
 }
 
 interface ForkContextResolverOptions {
 	openSession?: (path: string, sessionDir?: string) => BranchSessionManager;
+	/** Working directory to store in each forked session header. */
+	forkCwdForIndex?: (index: number) => string | undefined;
 	/** Rewrite a created fork before its path can be used to spawn a child. */
 	pruneSession?: (sessionFile: string) => Promise<void>;
 	/** Decide per child index whether a sanitized transcript must also disable the child's
@@ -174,6 +176,35 @@ function readSessionEntries(sessionFile: string): BranchSessionEntry[] {
 	});
 }
 
+/**
+ * `forkFrom` copies every entry in the source file and opens the copy with its
+ * last physical entry as the leaf.  It is therefore equivalent to
+ * `createBranchedSession(leafId)` only when the requested leaf is the complete
+ * persisted history.  Keep the older branch-aware API for sessions that have
+ * siblings or otherwise do not expose enough tree information to prove that
+ * property.
+ */
+function canUseFullHistoryFork(sourceManager: BranchSessionManager, leafId: string): boolean {
+	const entries = sourceManager.getEntries?.();
+	if (!entries || entries.length === 0) return false;
+	const ids = entries.map((entry) => entry.id);
+	if (ids.some((id) => id === undefined) || new Set(ids).size !== entries.length) return false;
+
+	const branch = sourceManager.getBranch?.(leafId);
+	if (branch) {
+		return branch.length === entries.length
+			&& branch.every((entry, index) => entry.id === ids[index]);
+	}
+
+	// Older/test SessionManager shims may not expose getBranch().  A strict
+	// physical-chain check is sufficient for those managers and fails closed for
+	// branched, malformed, or out-of-order transcripts.
+	return entries.at(-1)?.id === leafId
+		&& entries.every((entry, index) => index === 0
+			? entry.parentId === null || entry.parentId === undefined
+			: entry.parentId === entries[index - 1]?.id);
+}
+
 export function createForkContextResolver(
 	sessionManager: ForkableSessionManager,
 	requestedContext: unknown,
@@ -200,6 +231,7 @@ export function createForkContextResolver(
 	const openSession = options.openSession
 		?? sessionManager.openSession
 		?? ((file: string, dir?: string) => SessionManager.open(file, dir));
+	const useForkFrom = !options.openSession && !sessionManager.openSession;
 	// Fork files must not land in the parent's top-level session directory.
 	// Pi's recent-session discovery (`pi -c` → findMostRecentSession) is
 	// non-recursive and picks the largest-mtime *.jsonl in that directory, so
@@ -210,8 +242,7 @@ export function createForkContextResolver(
 	// records the tree relationship. The directory mirrors
 	// getSubagentSessionRoot() plus a "forks" level so fork files never sit
 	// loose next to run-N/ result directories. Derived from the file path
-	// rather than getSessionDir() so it also works when the manager cannot
-	// report its directory.
+	// rather than a manager-reported directory so it works for every manager.
 	const sessionDir = path.join(
 		path.dirname(parentSessionFile),
 		path.basename(parentSessionFile, ".jsonl"),
@@ -229,7 +260,15 @@ export function createForkContextResolver(
 				throw new Error(`Parent session file does not exist: ${parentSessionFile}. Pi has not persisted enough history to fork yet.`);
 			}
 			const sourceManager = openSession(parentSessionFile, sessionDir);
-			const sessionFile = sourceManager.createBranchedSession(leafId);
+			const targetCwd = options.forkCwdForIndex?.(index)
+				?? sourceManager.getHeader?.()?.cwd
+				?? process.cwd();
+			const forkedManager = useForkFrom && canUseFullHistoryFork(sourceManager, leafId)
+				? SessionManager.forkFrom(parentSessionFile, targetCwd, sessionDir)
+				: undefined;
+			const sessionFile = forkedManager
+				? forkedManager.getSessionFile()
+				: sourceManager.createBranchedSession(leafId);
 			if (!sessionFile) {
 				throw new Error("Session manager did not return a forked session file.");
 			}
