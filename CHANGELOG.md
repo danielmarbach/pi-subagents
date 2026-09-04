@@ -8,6 +8,7 @@
 - Configure proxy-aware HTTP dispatch in detached background runners. Thanks to [@jasonrale](https://github.com/jasonrale) for #1867/#1866.
 - Ignore stale model-not-found exclusions once the active model registry contains that model again. Thanks [@x1prog](https://github.com/x1prog) for #1862.
 - Alias `@earendil-works/pi-agent-core/node` to Pi's exact `./node` export for detached runners. Thanks [@plopezlpz](https://github.com/plopezlpz) for #1871.
+- Initialize Pi's global theme before child sessions bind their extensions, so extensions reading `ctx.ui.theme` no longer throw "Theme not initialized. Call initTheme() first." in subagent runs (detached background runners in particular). Thanks [@danielmarbach](https://github.com/danielmarbach) for #1865.
 
 ## [0.65.0] - 2026-09-04
 

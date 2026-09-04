@@ -296,6 +296,24 @@ describe("default child session factory", () => {
 		assert.deepEqual(errors, ["<loader>"]);
 	});
 
+	it("initializes the theme from settings before each child session", async () => {
+		const themed: Array<string | undefined> = [];
+		const pi = stubPi();
+		pi.initTheme = ((themeName?: string) => { themed.push(themeName); }) as PiCodingAgentModule["initTheme"];
+		pi.SettingsManager = { create: () => ({ getTheme: () => "solarized-dark" }) } as unknown as PiCodingAgentModule["SettingsManager"];
+		const factory = createDefaultChildSessionFactory({ loadPiCodingAgent: async () => pi });
+		await factory.create(stubLaunch);
+		await factory.create(stubLaunch);
+		assert.deepEqual(themed, ["solarized-dark", "solarized-dark"]);
+	});
+
+	it("skips theme initialization when the pi module has no initTheme export", async () => {
+		const factory = createDefaultChildSessionFactory({ loadPiCodingAgent: async () => stubPi() });
+		await factory.create(stubLaunch);
+		// Reaching here without throwing is the assertion: `settingsManager.getTheme()`
+		// must not be evaluated when `initTheme` is unavailable.
+	});
+
 	it("disposes the session when bindExtensions rejects", async () => {
 		let disposed = 0;
 		const factory = createDefaultChildSessionFactory({ loadPiCodingAgent: async () => stubPi({ bindExtensions: async () => { throw new Error("bind failed"); }, dispose: () => { disposed += 1; } }) });

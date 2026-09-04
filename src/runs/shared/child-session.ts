@@ -196,6 +196,16 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 			const modelRuntime = await sharedRuntime(pi);
 			const agentDir = getAgentDir();
 			const settingsManager = pi.SettingsManager.create(launch.cwd, agentDir);
+			// Headless child processes (the detached async runner in particular)
+			// never run pi's main-mode startup, so the global theme registry stays
+			// uninitialized and any extension reading `ctx.ui.theme` throws
+			// "Theme not initialized. Call initTheme() first." on every event it
+			// handles. Initialize the theme from the configured settings here,
+			// mirroring the `initTheme(settingsManager.getTheme(), ...)` call
+			// main-mode makes in main.js. Re-initializing in a process where main
+			// already initialized is idempotent (same theme name), and load errors
+			// fall back to the built-in dark theme exactly like main-mode.
+			if (typeof pi.initTheme === "function") pi.initTheme(settingsManager.getTheme());
 			const loader = new pi.DefaultResourceLoader({
 				cwd: launch.cwd,
 				agentDir,
